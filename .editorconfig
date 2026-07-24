@@ -1,0 +1,26 @@
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+indent_style = space
+indent_size = 4
+trim_trailing_whitespace = true
+insert_final_newline = true
+
+[*.{kt,kts}]
+ktlint_code_style = ktlint_official
+max_line_length = 120
+
+# Enable trailing commas
+ktlint_standard_trailing-comma-on-call-site = enabled
+ktlint_standard_trailing-comma-on-declaration-site = enabled
+
+# Disable blank lines between declarations in class bodies
+ktlint_standard_blank-line-before-declaration = disabled
+
+# Allow capitalization in package names
+ktlint_standard_package-name = disabled
+
+# Allow single-line class bodies (e.g. data object Foo : Bar { override val id = 1 })
+ktlint_standard_statement-wrapping = disabled
