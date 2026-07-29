@@ -212,6 +212,29 @@ fun close(registry: HardwareRegistry) {
     registry.canRxSubscriptions.clear()
 }
 
+private const val WARMUP_PWM_PORT = 0
+private const val WARMUP_DIO_INPUT = 0
+private const val WARMUP_DIO_OUTPUT = 1
+private const val WARMUP_AIO_INPUT = 0
+private const val WARMUP_AIO_OUTPUT = 0
+private const val WARMUP_CAN_MESSAGE_ID = 0
+
+/**
+ * Force the one-time HAL/JNI bring-up for each resource family by briefly
+ * allocating and releasing one device. Best-effort: a family that fails to
+ * allocate (unavailable on this controller) is skipped, so its init is simply
+ * paid on first real use instead. Call once before the timed loop starts so a
+ * client's first registration can't stall a periodic cycle.
+ */
+fun warmUpHal() {
+    runCatching { PWM(WARMUP_PWM_PORT).close() }
+    runCatching { DigitalInput(WARMUP_DIO_INPUT).close() }
+    runCatching { DigitalOutput(WARMUP_DIO_OUTPUT).close() }
+    runCatching { AnalogInput(WARMUP_AIO_INPUT).close() }
+    runCatching { AnalogOutput(WARMUP_AIO_OUTPUT).close() }
+    runCatching { CAN(WARMUP_CAN_MESSAGE_ID).close() }
+}
+
 private fun canFor(
     registry: HardwareRegistry,
     messageId: Int,

@@ -2,9 +2,13 @@ package mutiny.relay
 
 import edu.wpi.first.wpilibj.TimedRobot
 import edu.wpi.first.wpilibj.Timer
+import edu.wpi.first.wpilibj.Tracer
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.CopyOnWriteArrayList
 import edu.wpi.first.wpilibj.RobotState as WpiRobotState
+
+/** Individual actions slower than this (ms) are logged to isolate apply hotspots. */
+private const val SLOW_ACTION_THRESHOLD_MS = 1.0
 
 /**
  * A transparent relay between an external robot application and the controller's
@@ -22,6 +26,7 @@ class TimedRobotRelay :
     private val pending = ConcurrentLinkedQueue<RobotAction>()
     private val registry = HardwareRegistry()
     private val shutdownHooks = CopyOnWriteArrayList<() -> Unit>()
+    private val loopTracer = Tracer()
 
     @Volatile
     private var state: RobotState = RobotState.EMPTY
@@ -37,24 +42,41 @@ class TimedRobotRelay :
     }
 
     override fun robotInit() {
-        println("[TimedRobotRelay] initialized; period=${period}s")
+        val warmupStartSec = Timer.getFPGATimestamp()
+        warmUpHal()
+        val warmupMs = (Timer.getFPGATimestamp() - warmupStartSec) * 1_000.0
+        println(
+            "[TimedRobotRelay] initialized; period=${period}s; HAL warm-up ${"%.1f".format(warmupMs)}ms",
+        )
     }
 
     override fun robotPeriodic() {
+        val loopStartSec = Timer.getFPGATimestamp()
+        loopTracer.clearEpochs()
+
         // 1. Drain the action queue (network thread wrote here; we own it now).
         val drained = ArrayList<RobotAction>()
         while (true) {
             drained.add(pending.poll() ?: break)
         }
+        loopTracer.addEpoch("drain (${drained.size})")
 
         // 2. Apply each action; capture failures for diagnostics.
         val errors = ArrayList<ActionError>(drained.size)
         for (action in drained) {
-            when (val outcome = execute(registry, action)) {
-                ApplyOutcome.Applied -> Unit
-                is ApplyOutcome.Failed -> errors.add(ActionError(action, outcome.error))
+            val actionStartSec = Timer.getFPGATimestamp()
+            val outcome = execute(registry, action)
+            val actionMs = (Timer.getFPGATimestamp() - actionStartSec) * 1_000.0
+            if (outcome is ApplyOutcome.Failed) {
+                errors.add(ActionError(action, outcome.error))
+            }
+            if (actionMs > SLOW_ACTION_THRESHOLD_MS) {
+                println(
+                    "[TimedRobotRelay] slow action ${action::class.simpleName}: ${"%.2f".format(actionMs)}ms",
+                )
             }
         }
+        loopTracer.addEpoch("apply (${drained.size})")
 
         // 3. Sample inputs + commanded outputs and publish an atomic snapshot.
         state =
@@ -69,6 +91,13 @@ class TimedRobotRelay :
                 emergencyStopped = WpiRobotState.isEStopped(),
                 errors = errors,
             )
+        loopTracer.addEpoch("sample")
+
+        // Only surface the per-phase breakdown when this cycle overran the budget;
+        // Tracer.printEpochs() is internally rate-limited to once per second.
+        if (Timer.getFPGATimestamp() - loopStartSec > period) {
+            loopTracer.printEpochs()
+        }
     }
 
     override fun endCompetition() {
