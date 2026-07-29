@@ -29,6 +29,28 @@ deploy {
                 // First part is artifact name, 2nd is artifact type
                 // getTargetTypeClass is a shortcut to get the class type using a string
 
+                // The roboRIO's own hostname isn't in /etc/hosts by default, so the JMX
+                // management agent's InetAddress.getLocalHost() call at JVM startup throws
+                // UnknownHostException and aborts the JVM before main() runs. Ensure the
+                // hostname resolves (USB link-local + team IP) just before every start.
+                frcHostsFix(getArtifactTypeClass('CommandArtifact')) {
+                    def tn = project.frc.getTeamNumber() as int
+                    def teamIp = "10.${tn.intdiv(100)}.${tn % 100}.2"
+                    command = '''
+set -e
+H=$(hostname)
+T=__TEAM_IP__
+LL=$(ip -o -4 addr show 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | grep '^169' | head -n1)
+[ -f /etc/hosts.tds.bak ] || cp /etc/hosts /etc/hosts.tds.bak
+grep -vE "[[:space:]]${H}([[:space:]]|$)" /etc/hosts > /etc/hosts.new || true
+[ -n "${LL}" ] && echo "${LL} ${H}" >> /etc/hosts.new
+echo "${T} ${H}" >> /etc/hosts.new
+cat /etc/hosts.new > /etc/hosts
+rm -f /etc/hosts.new
+echo "TDS hosts-fixed: ${H} -> ${T}${LL:+ ${LL}}"
+'''.trim().replace('__TEAM_IP__', teamIp)
+                }
+
                 frcJava(getArtifactTypeClass('FRCJavaArtifact')) {
                     // Enable VisualVM connection
                     jvmArgs.add("-Dcom.sun.management.jmxremote=true")
@@ -48,6 +70,13 @@ deploy {
         }
     }
 }
+
+// Run the /etc/hosts fix before the robot program (re)starts (FRCProgramStartArtifact
+// is in the ProgramStart stage), so the JMX agent's getLocalHost() resolves on every deploy.
+deploy.targets.roborio.setDeployStage(
+    deploy.targets.roborio.artifacts.frcHostsFix,
+    edu.wpi.first.gradlerio.deploy.DeployStage.BeforeProgramStart
+)
 
 def deployArtifact = deploy.targets.roborio.artifacts.frcJava
 
