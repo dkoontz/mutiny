@@ -53,7 +53,7 @@ echo "TDS hosts-fixed: ${H} -> ${T}${LL:+ ${LL}}"
 
 //                Uncomment this if you want to connect JDK Mission Control for profiling
 //                    be sure to set the hostname to whatever your team name is
-//                frcJava(getArtifactTypeClass('FRCJavaArtifact')) {
+                frcJava(getArtifactTypeClass('FRCJavaArtifact')) {
 //                     Enable VisualVM connection
 //                    jvmArgs.add("-Dcom.sun.management.jmxremote=true")
 //                    jvmArgs.add("-Dcom.sun.management.jmxremote.port=1198")
@@ -61,7 +61,7 @@ echo "TDS hosts-fixed: ${H} -> ${T}${LL:+ ${LL}}"
 //                    jvmArgs.add("-Dcom.sun.management.jmxremote.ssl=false")
 //                    jvmArgs.add("-Dcom.sun.management.jmxremote.authenticate=false")
 //                    jvmArgs.add("-Djava.rmi.server.hostname=roborio-10933-frc.local")
-//                }
+                }
 
                 // Static files artifact
                 frcStaticFileDeploy(getArtifactTypeClass('FileTreeArtifact')) {

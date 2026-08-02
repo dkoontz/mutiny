@@ -138,4 +138,34 @@ sealed interface RobotAction {
         val apiId: Int,
         val data: List<Int>,
     ) : RobotAction
+
+    // --------------------------------------------------------------- SPARK MAX
+
+    @Serializable
+    @SerialName("sparkmax.register") // assuming all sparkmaxes will be brushless because we currently only have neos
+    data class RegisterBrushlessSparkMax(
+        val deviceId: Int,
+    ) : RobotAction
+
+    @Serializable
+    @SerialName("sparkmax.deregister")
+    data class DeregisterSparkMax(
+        val deviceId: Int,
+    ) : RobotAction
+
+    @Serializable
+    @SerialName(
+        "sparkmax.setOutput",
+    ) // TODO: should I name this dutycycle as well or keep it to "output" or "speed" to keep it more simple clientside
+    data class SetSparkMaxDutyCycle(
+        val deviceId: Int,
+        val dutyCycle: Double, // takes in values from -1.0 to 1.0.
+    ) : RobotAction
+
+    @Serializable
+    @SerialName("sparkmax.setVoltage")
+    data class SetSparkMaxVoltage(
+        val deviceId: Int,
+        val voltage: Double,
+    ) : RobotAction
 }

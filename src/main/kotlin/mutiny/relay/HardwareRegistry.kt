@@ -1,5 +1,8 @@
 package mutiny.relay
 
+import com.revrobotics.REVLibError
+import com.revrobotics.spark.SparkLowLevel
+import com.revrobotics.spark.SparkMax
 import edu.wpi.first.hal.CANData
 import edu.wpi.first.wpilibj.AnalogInput
 import edu.wpi.first.wpilibj.AnalogOutput
@@ -18,10 +21,15 @@ import mutiny.relay.DeviceKind.CAN
 import mutiny.relay.DeviceKind.DIGITAL_INPUT
 import mutiny.relay.DeviceKind.DIGITAL_OUTPUT
 import mutiny.relay.DeviceKind.PWM
+import mutiny.relay.DeviceKind.SPARKMAX
 
 /** roboRIO analog output voltage range (per WPILib AnalogOutput spec). */
 private const val ANALOG_OUT_MIN = 0.0
 private const val ANALOG_OUT_MAX = 5.0
+
+/** Possible voltage ranges for an FRC 12V battery. */
+private const val MOTOR_MIN_VOLTAGE = -12.0
+private const val MOTOR_MAX_VOLTAGE = 12.0
 
 /**
  * Outcome of executing a single [RobotAction] against a [HardwareRegistry].
@@ -48,6 +56,8 @@ class HardwareRegistry {
     internal val canDevices = HashMap<Int, CAN>()
     internal val canRxSubscriptions = ArrayList<Pair<Int, Int>>()
     internal val canBuffer = CANData()
+
+    internal val sparkMaxDevices = HashMap<Int, SparkMax>()
 }
 
 /**
@@ -137,9 +147,68 @@ fun execute(
                 writeCan(registry, action.messageId, action.apiId, action.data.toWireBytes())
             }
         }
+
+        // SPARK MAX
+        is RobotAction.RegisterBrushlessSparkMax -> {
+            registerWithVerify(
+                map = registry.sparkMaxDevices,
+                id = action.deviceId,
+                deviceKind = SPARKMAX,
+                factory = { SparkMax(action.deviceId, SparkLowLevel.MotorType.kBrushless) },
+                verify = { sparkMaxDevice ->
+                    val firmware = sparkMaxDevice.firmwareString
+                    val error = sparkMaxDevice.lastError
+
+                    val connected = (error == REVLibError.kOk) && !firmware.isNullOrEmpty()
+
+                    if (connected) {
+                        ApplyOutcome.Applied
+                    } else {
+                        ApplyOutcome.Failed(ApplyError.NotConnected(SPARKMAX, action.deviceId))
+                    }
+                },
+                onRejected = { sparkMaxDevice ->
+                    sparkMaxDevice.close()
+                },
+            )
+        }
+        is RobotAction.DeregisterSparkMax ->
+            release(registry.sparkMaxDevices, action.deviceId, SPARKMAX)
+        is RobotAction.SetSparkMaxDutyCycle ->
+            if (action.dutyCycle !in -1.0..1.0) {
+                ApplyOutcome.Failed(
+                    OutOfRange(
+                        SPARKMAX,
+                        action.deviceId,
+                        "dutyCycle",
+                        action.dutyCycle,
+                        -1.0,
+                        1.0,
+                    ),
+                )
+            } else {
+                operate(registry.sparkMaxDevices, action.deviceId, SPARKMAX) { it.set(action.dutyCycle) }
+            }
+
+        is RobotAction.SetSparkMaxVoltage ->
+            if (action.voltage !in MOTOR_MIN_VOLTAGE..MOTOR_MAX_VOLTAGE) {
+                ApplyOutcome.Failed(
+                    OutOfRange(
+                        SPARKMAX,
+                        action.deviceId,
+                        "voltage",
+                        action.voltage,
+                        MOTOR_MIN_VOLTAGE,
+                        MOTOR_MAX_VOLTAGE,
+                    ),
+                )
+            } else {
+                operate(registry.sparkMaxDevices, action.deviceId, SPARKMAX) { it.setVoltage(action.voltage) }
+            }
     }
 
 /** Build an immutable snapshot of every input and commanded output in [registry]. */
+// TODO: add sparkmax snapshots, although I doubt we'll be using them in season so maybe not necessary
 fun sample(
     registry: HardwareRegistry,
     sequence: Long,
@@ -203,6 +272,7 @@ fun close(registry: HardwareRegistry) {
     registry.analogInputs.values.forEach { it.close() }
     registry.analogOutputs.values.forEach { it.close() }
     registry.canDevices.values.forEach { it.close() }
+    registry.sparkMaxDevices.values.forEach { it.close() }
     registry.pwm.clear()
     registry.digitalInputs.clear()
     registry.digitalOutputs.clear()
@@ -210,6 +280,7 @@ fun close(registry: HardwareRegistry) {
     registry.analogOutputs.clear()
     registry.canDevices.clear()
     registry.canRxSubscriptions.clear()
+    registry.sparkMaxDevices.clear()
 }
 
 private const val WARMUP_PWM_PORT = 0
@@ -253,6 +324,56 @@ private inline fun <T> register(
     } catch (e: Exception) {
         ApplyOutcome.Failed(AllocationFailed(deviceKind, id, e.describe()))
     }
+
+/** Allocate (idempotently) a device if it passes a verification, classifying a WPILib throw as
+ * [AllocationFailed] and a verification throw as [HardwareFault]. Allows for a cleanup function
+ * to be specified in case of a verification failure. */
+// TODO: Would it be better to replace the existing register function with this by letting verify and onReject default to
+//      an empty lambda or keep them separate?
+private inline fun <T> registerWithVerify(
+    map: MutableMap<Int, T>,
+    id: Int,
+    deviceKind: DeviceKind,
+    factory: () -> T,
+    verify: (T) -> ApplyOutcome,
+    onRejected: (T) -> Unit,
+): ApplyOutcome {
+    if (map.containsKey(id)) {
+        return ApplyOutcome.Applied
+    } else {
+        val device =
+            try {
+                factory()
+            } catch (e: Exception) {
+                return ApplyOutcome.Failed(AllocationFailed(deviceKind, id, e.describe()))
+            }
+
+        val outcome =
+            try {
+                verify(device)
+            } catch (e: Exception) {
+                ApplyOutcome.Failed(HardwareFault(deviceKind, id, e.describe()))
+            }
+
+        when (outcome) {
+            is ApplyOutcome.Applied -> {
+                map[id] = device
+                return outcome
+            }
+            is ApplyOutcome.Failed -> {
+                try {
+                    onRejected(device)
+                } catch (e: Exception) {
+                    println(
+                        "Failed to clean up " +
+                            "$deviceKind $id: ${e.describe()}" + "that did not pass verification",
+                    )
+                }
+                return outcome
+            }
+        }
+    }
+}
 
 /** Run [block] on a registered device, or report it [NotRegistered] / [HardwareFault]. */
 private inline fun <T> operate(

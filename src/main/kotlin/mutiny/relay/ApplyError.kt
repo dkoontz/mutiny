@@ -12,6 +12,7 @@ enum class DeviceKind {
     ANALOG_INPUT,
     ANALOG_OUTPUT,
     CAN,
+    SPARKMAX,
 }
 
 /**
@@ -66,6 +67,14 @@ sealed interface ApplyError {
         override val id: Int,
         /** WPILib's explanation of why allocation failed. */
         val detail: String,
+    ) : ApplyError
+
+    /** The CAN device with the specified id did not respond. */
+    @Serializable
+    @SerialName("notConnected")
+    data class NotConnected(
+        override val deviceKind: DeviceKind,
+        override val id: Int,
     ) : ApplyError
 
     /** A WPILib operation failed at runtime (a read/write threw). */
