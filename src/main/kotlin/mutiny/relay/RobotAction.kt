@@ -142,7 +142,7 @@ sealed interface RobotAction {
     // --------------------------------------------------------------- SPARK MAX
 
     @Serializable
-    @SerialName("sparkmax.register") // assuming all sparkmaxes will be brushless because we currently only have neos
+    @SerialName("sparkmax.register") //TODO: Currently assumes all SPARK MAXes are brushless. Add register for brushed motors
     data class RegisterBrushlessSparkMax(
         val deviceId: Int,
     ) : RobotAction
@@ -153,13 +153,15 @@ sealed interface RobotAction {
         val deviceId: Int,
     ) : RobotAction
 
+    /** @param output corresponds to a normalized voltage from -1.0 to 1.0 where -1.0 represents the full
+     *  available voltage in reverse and 1.0 represents the full available voltage forward.
+     *  This means that .5 will produce an output corresponding to 6V if the power supply is at 12V, but
+     *  only 5V if the power supply is at 10V.*/
     @Serializable
-    @SerialName(
-        "sparkmax.setOutput",
-    ) // TODO: should I name this dutycycle as well or keep it to "output" or "speed" to keep it more simple clientside
-    data class SetSparkMaxDutyCycle(
+    @SerialName("sparkmax.setOutput")
+    data class SetSparkMaxOutput(
         val deviceId: Int,
-        val dutyCycle: Double, // takes in values from -1.0 to 1.0.
+        val output: Double,
     ) : RobotAction
 
     @Serializable

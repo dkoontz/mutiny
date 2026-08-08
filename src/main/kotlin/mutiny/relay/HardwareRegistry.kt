@@ -28,8 +28,12 @@ private const val ANALOG_OUT_MIN = 0.0
 private const val ANALOG_OUT_MAX = 5.0
 
 /** Possible voltage ranges for an FRC 12V battery. */
-private const val MOTOR_MIN_VOLTAGE = -12.0
-private const val MOTOR_MAX_VOLTAGE = 12.0
+private const val FRC_POWERSUPPLY_MIN_VOLTAGE = -12.0
+private const val FRC_POWERSUPPLY_MAX_VOLTAGE = 12.0
+
+/** Valid SparkMax setOutput input range */
+private const val SPARKMAX_OUT_MIN = -1.0
+private const val SPARKMAX_OUT_MAX = 1.0
 
 /**
  * Outcome of executing a single [RobotAction] against a [HardwareRegistry].
@@ -174,32 +178,31 @@ fun execute(
         }
         is RobotAction.DeregisterSparkMax ->
             release(registry.sparkMaxDevices, action.deviceId, SPARKMAX)
-        is RobotAction.SetSparkMaxDutyCycle ->
-            if (action.dutyCycle !in -1.0..1.0) {
+        is RobotAction.SetSparkMaxOutput ->
+            if (action.output !in SPARKMAX_OUT_MIN..SPARKMAX_OUT_MAX) {
                 ApplyOutcome.Failed(
                     OutOfRange(
                         SPARKMAX,
                         action.deviceId,
                         "dutyCycle",
-                        action.dutyCycle,
-                        -1.0,
-                        1.0,
+                        action.output,
+                        SPARKMAX_OUT_MIN,
+                        SPARKMAX_OUT_MAX,
                     ),
                 )
             } else {
-                operate(registry.sparkMaxDevices, action.deviceId, SPARKMAX) { it.set(action.dutyCycle) }
+                operate(registry.sparkMaxDevices, action.deviceId, SPARKMAX) { it.set(action.output) }
             }
-
         is RobotAction.SetSparkMaxVoltage ->
-            if (action.voltage !in MOTOR_MIN_VOLTAGE..MOTOR_MAX_VOLTAGE) {
+            if (action.voltage !in FRC_POWERSUPPLY_MIN_VOLTAGE..FRC_POWERSUPPLY_MAX_VOLTAGE) {
                 ApplyOutcome.Failed(
                     OutOfRange(
                         SPARKMAX,
                         action.deviceId,
                         "voltage",
                         action.voltage,
-                        MOTOR_MIN_VOLTAGE,
-                        MOTOR_MAX_VOLTAGE,
+                        FRC_POWERSUPPLY_MIN_VOLTAGE,
+                        FRC_POWERSUPPLY_MAX_VOLTAGE,
                     ),
                 )
             } else {
@@ -328,8 +331,6 @@ private inline fun <T> register(
 /** Allocate (idempotently) a device if it passes a verification, classifying a WPILib throw as
  * [AllocationFailed] and a verification throw as [HardwareFault]. Allows for a cleanup function
  * to be specified in case of a verification failure. */
-// TODO: Would it be better to replace the existing register function with this by letting verify and onReject default to
-//      an empty lambda or keep them separate?
 private inline fun <T> registerWithVerify(
     map: MutableMap<Int, T>,
     id: Int,
