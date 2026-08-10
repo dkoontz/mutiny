@@ -135,6 +135,7 @@ private fun filter(
         analogInputs = keepKeys(state.analogInputs, subscription.analogInputs),
         analogOutputs = keepKeys(state.analogOutputs, subscription.analogOutputs),
         canFrames = keepKeys(state.canFrames, subscription.canFrames),
+        sparkMaxSnapshots = keepKeys(state.sparkMaxSnapshots, subscription.sparkMax),
     )
 
 private fun <K, V> keepKeys(

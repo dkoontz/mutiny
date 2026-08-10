@@ -10,6 +10,7 @@ import edu.wpi.first.wpilibj.CAN
 import edu.wpi.first.wpilibj.DigitalInput
 import edu.wpi.first.wpilibj.DigitalOutput
 import edu.wpi.first.wpilibj.PWM
+import edu.wpi.first.wpilibj.RobotController
 import mutiny.relay.ApplyError.AllocationFailed
 import mutiny.relay.ApplyError.HardwareFault
 import mutiny.relay.ApplyError.InvalidCanByte
@@ -22,14 +23,11 @@ import mutiny.relay.DeviceKind.DIGITAL_INPUT
 import mutiny.relay.DeviceKind.DIGITAL_OUTPUT
 import mutiny.relay.DeviceKind.PWM
 import mutiny.relay.DeviceKind.SPARKMAX
+import mutiny.relay.Snapshot.CanFrameSnapshot
 
 /** roboRIO analog output voltage range (per WPILib AnalogOutput spec). */
 private const val ANALOG_OUT_MIN = 0.0
 private const val ANALOG_OUT_MAX = 5.0
-
-/** Possible voltage ranges for an FRC 12V battery. */
-private const val FRC_POWERSUPPLY_MIN_VOLTAGE = -12.0
-private const val FRC_POWERSUPPLY_MAX_VOLTAGE = 12.0
 
 /** Valid SparkMax setOutput input range */
 private const val SPARKMAX_OUT_MIN = -1.0
@@ -60,7 +58,6 @@ class HardwareRegistry {
     internal val canDevices = HashMap<Int, CAN>()
     internal val canRxSubscriptions = ArrayList<Pair<Int, Int>>()
     internal val canBuffer = CANData()
-
     internal val sparkMaxDevices = HashMap<Int, SparkMax>()
 }
 
@@ -194,20 +191,7 @@ fun execute(
                 operate(registry.sparkMaxDevices, action.deviceId, SPARKMAX) { it.set(action.output) }
             }
         is RobotAction.SetSparkMaxVoltage ->
-            if (action.voltage !in FRC_POWERSUPPLY_MIN_VOLTAGE..FRC_POWERSUPPLY_MAX_VOLTAGE) {
-                ApplyOutcome.Failed(
-                    OutOfRange(
-                        SPARKMAX,
-                        action.deviceId,
-                        "voltage",
-                        action.voltage,
-                        FRC_POWERSUPPLY_MIN_VOLTAGE,
-                        FRC_POWERSUPPLY_MAX_VOLTAGE,
-                    ),
-                )
-            } else {
-                operate(registry.sparkMaxDevices, action.deviceId, SPARKMAX) { it.setVoltage(action.voltage) }
-            }
+            operate(registry.sparkMaxDevices, action.deviceId, SPARKMAX) { it.setVoltage(action.voltage) }
     }
 
 /** Build an immutable snapshot of every input and commanded output in [registry]. */
@@ -229,6 +213,46 @@ fun sample(
     val digitalOut = registry.digitalOutputs.mapValues { it.value.get() }
     val pwmSpeed = registry.pwm.mapValues { it.value.speed }
     val pwmPosition = registry.pwm.mapValues { it.value.position }
+    val sparkMaxSnapshots =
+        registry.sparkMaxDevices.mapValues {
+            // TODO: Decide whether to keep native motor units or choose
+            //      consistent units to send to the client across all vendors?
+            val position = it.value.encoder.position
+            val positionError = it.value.lastError
+            val positionStatus =
+                if (positionError == REVLibError.kOk) {
+                    SignalStatus.Ok
+                } else {
+                    SignalStatus.Error(positionError.toString())
+                }
+
+            val velocity = it.value.encoder.velocity
+            val velocityError = it.value.lastError
+            val velocityStatus =
+                if (velocityError == REVLibError.kOk) {
+                    SignalStatus.Ok
+                } else {
+                    SignalStatus.Error(velocityError.toString())
+                }
+            val timestampSeconds = RobotController.getFPGATime() / 1_000_000.0
+
+            Snapshot.SparkMaxSnapshot(
+                // Number of motor rotations
+                position =
+                    SignalSample(
+                        value = position,
+                        timestampSeconds = timestampSeconds,
+                        status = positionStatus,
+                    ),
+                // Motor RPM
+                velocity =
+                    SignalSample(
+                        value = velocity,
+                        timestampSeconds = timestampSeconds,
+                        status = velocityStatus,
+                    ),
+            )
+        }
     val canFrames = HashMap<String, CanFrameSnapshot>()
     for ((messageId, apiId) in registry.canRxSubscriptions) {
         val valid = canFor(registry, messageId).readPacketLatest(apiId, registry.canBuffer)
@@ -262,6 +286,7 @@ fun sample(
         digitalOutputs = digitalOut,
         pwmSpeed = pwmSpeed,
         pwmPosition = pwmPosition,
+        sparkMaxSnapshots = sparkMaxSnapshots,
         canFrames = canFrames,
         errors = errors,
     )

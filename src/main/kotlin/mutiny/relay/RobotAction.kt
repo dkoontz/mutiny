@@ -142,7 +142,9 @@ sealed interface RobotAction {
     // --------------------------------------------------------------- SPARK MAX
 
     @Serializable
-    @SerialName("sparkmax.register") //TODO: Currently assumes all SPARK MAXes are brushless. Add register for brushed motors
+    @SerialName(
+        "sparkmax.register",
+    ) // TODO: Currently assumes all SPARK MAXes are brushless. Add register for brushed motors
     data class RegisterBrushlessSparkMax(
         val deviceId: Int,
     ) : RobotAction
