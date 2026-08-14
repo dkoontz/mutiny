@@ -16,19 +16,20 @@ sealed interface RobotAction {
     @SerialName("pwm.register")
     data class RegisterPwm(
         val port: Int,
+        val mode: PwmMode,
     ) : RobotAction
 
     @Serializable
     @SerialName("pwm.deregister")
     data class DeregisterPwm(
-        val port: Int,
+        val token: Token,
     ) : RobotAction
 
     /** @param speed -1.0 (full reverse) - 1.0 (full forward). */
     @Serializable
     @SerialName("pwm.setSpeed")
     data class SetPwmSpeed(
-        val port: Int,
+        val token: Token,
         val speed: Double,
     ) : RobotAction
 
@@ -36,14 +37,14 @@ sealed interface RobotAction {
     @Serializable
     @SerialName("pwm.setPosition")
     data class SetPwmPosition(
-        val port: Int,
+        val token: Token,
         val position: Double,
     ) : RobotAction
 
     @Serializable
     @SerialName("pwm.disable")
     data class DisablePwm(
-        val port: Int,
+        val token: Token,
     ) : RobotAction
 
     // ----------------------------------------------------------- Digital IO
@@ -62,19 +63,19 @@ sealed interface RobotAction {
     @Serializable
     @SerialName("dio.deregisterInput")
     data class DeregisterDigitalInput(
-        val channel: Int,
+        val token: Token,
     ) : RobotAction
 
     @Serializable
     @SerialName("dio.deregisterOutput")
     data class DeregisterDigitalOutput(
-        val channel: Int,
+        val token: Token,
     ) : RobotAction
 
     @Serializable
     @SerialName("dio.setOutput")
     data class SetDigitalOutput(
-        val channel: Int,
+        val token: Token,
         val value: Boolean,
     ) : RobotAction
 
@@ -94,19 +95,19 @@ sealed interface RobotAction {
     @Serializable
     @SerialName("aio.deregisterInput")
     data class DeregisterAnalogInput(
-        val channel: Int,
+        val token: Token,
     ) : RobotAction
 
     @Serializable
     @SerialName("aio.deregisterOutput")
     data class DeregisterAnalogOutput(
-        val channel: Int,
+        val token: Token,
     ) : RobotAction
 
     @Serializable
     @SerialName("aio.setOutput")
     data class SetAnalogOutput(
-        val channel: Int,
+        val token: Token,
         val voltage: Double,
     ) : RobotAction
 

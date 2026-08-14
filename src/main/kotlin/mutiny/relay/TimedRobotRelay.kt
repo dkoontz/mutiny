@@ -3,6 +3,8 @@ package mutiny.relay
 import edu.wpi.first.wpilibj.TimedRobot
 import edu.wpi.first.wpilibj.Timer
 import edu.wpi.first.wpilibj.Tracer
+import kotlinx.coroutines.CompletableDeferred
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.CopyOnWriteArrayList
 import edu.wpi.first.wpilibj.RobotState as WpiRobotState
@@ -11,25 +13,43 @@ import edu.wpi.first.wpilibj.RobotState as WpiRobotState
 private const val SLOW_ACTION_THRESHOLD_MS = 1.0
 
 /**
+ * One queued register RPC: the owning session, the register action, and the
+ * deferred the periodic loop completes with the outcome.
+ */
+private data class PendingRegister(
+    val session: SessionId,
+    val action: RobotAction,
+    val deferred: CompletableDeferred<RegisterOutcome>,
+)
+
+/**
  * A transparent relay between an external robot application and the controller's
- * WPILib hardware. It owns no control logic of its own: a separate network client
- * enqueues [RobotAction]s via [submit] (from any thread), and every periodic
- * cycle this class drains the queue, applies the actions to the hardware,
- * publishes a fresh [RobotState] snapshot, and repeats.
+ * WPILib hardware. It owns no control logic of its own: a separate network
+ * client enqueues [RobotAction]s via [submitAction] / [submitRegister] (from any
+ * thread), and every periodic cycle this class drains the two queues —
+ * registers are resolved (minting tokens, completing their RPC deferreds) and
+ * operates are applied (gated by the DS enabled state) — then publishes a fresh
+ * [RobotState] snapshot, and repeats.
  *
- * The network layer (websocket / protobuf / zmq / ...) is intentionally out of
- * scope here; it only needs a reference to this object as a [NetworkProvider].
+ * Each WebSocket connection is a [SessionId] ([openSession] / [closeSession]);
+ * [closeSession] releases every device the session minted, so reconnect is a
+ * clean slate. The network layer (websocket / protobuf / zmq / ...) is
+ * intentionally out of scope here; it only needs a reference to this object as a
+ * [NetworkProvider].
  */
 class TimedRobotRelay :
     TimedRobot(),
     NetworkProvider {
-    private val pending = ConcurrentLinkedQueue<RobotAction>()
+    private val pendingActions = ConcurrentLinkedQueue<Pair<SessionId, RobotAction>>()
+    private val pendingRegisters = ConcurrentLinkedQueue<PendingRegister>()
     private val registry = HardwareRegistry()
+    private val sessions = ConcurrentHashMap.newKeySet<SessionId>()
     private val shutdownHooks = CopyOnWriteArrayList<() -> Unit>()
     private val loopTracer = Tracer()
 
     @Volatile
     private var state: RobotState = RobotState.EMPTY
+
     private var sequence = 0L
 
     /**
@@ -54,18 +74,39 @@ class TimedRobotRelay :
         val loopStartSec = Timer.getFPGATimestamp()
         loopTracer.clearEpochs()
 
-        // 1. Drain the action queue (network thread wrote here; we own it now).
-        val drained = ArrayList<RobotAction>()
+        // 1. Drain both queues (network threads wrote here; we own them now).
+        val drainedRegisters = ArrayList<PendingRegister>()
         while (true) {
-            drained.add(pending.poll() ?: break)
+            drainedRegisters.add(pendingRegisters.poll() ?: break)
         }
-        loopTracer.addEpoch("drain (${drained.size})")
+        val drainedActions = ArrayList<Pair<SessionId, RobotAction>>()
+        while (true) {
+            drainedActions.add(pendingActions.poll() ?: break)
+        }
+        loopTracer.addEpoch("drain (r=${drainedRegisters.size}, a=${drainedActions.size})")
 
-        // 2. Apply each action; capture failures for diagnostics.
-        val errors = ArrayList<ActionError>(drained.size)
-        for (action in drained) {
+        // 2. Resolve register RPCs: mint tokens (or structured errors) and complete
+        //    each deferred. Register failures are per-session RPC replies only —
+        //    they do NOT go into the broadcast snapshot.
+        for (pending in drainedRegisters) {
             val actionStartSec = Timer.getFPGATimestamp()
-            val outcome = execute(registry, action)
+            val outcome = register(registry, pending.session, pending.action)
+            pending.deferred.complete(outcome)
+            val actionMs = (Timer.getFPGATimestamp() - actionStartSec) * 1_000.0
+            if (actionMs > SLOW_ACTION_THRESHOLD_MS) {
+                println(
+                    "[TimedRobotRelay] slow register ${pending.action::class.simpleName}: ${"%.2f".format(actionMs)}ms",
+                )
+            }
+        }
+        loopTracer.addEpoch("register (${drainedRegisters.size})")
+
+        // 3. Apply operate actions; capture failures for the snapshot. Operates are
+        //    rejected while the DS has the robot disabled.
+        val errors = ArrayList<ActionError>(drainedActions.size)
+        for ((_, action) in drainedActions) {
+            val actionStartSec = Timer.getFPGATimestamp()
+            val outcome = execute(registry, isEnabled, action)
             val actionMs = (Timer.getFPGATimestamp() - actionStartSec) * 1_000.0
             if (outcome is ApplyOutcome.Failed) {
                 errors.add(ActionError(action, outcome.error))
@@ -76,9 +117,9 @@ class TimedRobotRelay :
                 )
             }
         }
-        loopTracer.addEpoch("apply (${drained.size})")
+        loopTracer.addEpoch("apply (${drainedActions.size})")
 
-        // 3. Sample inputs + commanded outputs and publish an atomic snapshot.
+        // 4. Sample inputs + commanded outputs and publish an atomic snapshot.
         state =
             sample(
                 registry,
@@ -107,8 +148,32 @@ class TimedRobotRelay :
 
     // ----- NetworkProvider -----
 
-    override fun submit(action: RobotAction) {
-        pending.add(action)
+    override fun openSession(): SessionId {
+        val id = SessionId.random()
+        sessions.add(id)
+        return id
+    }
+
+    override fun closeSession(id: SessionId) {
+        if (sessions.remove(id)) {
+            releaseSession(registry, id)
+        }
+    }
+
+    override fun submitAction(
+        sessionId: SessionId,
+        action: RobotAction,
+    ) {
+        pendingActions.add(sessionId to action)
+    }
+
+    override fun submitRegister(
+        sessionId: SessionId,
+        action: RobotAction,
+    ): CompletableDeferred<RegisterOutcome> {
+        val deferred = CompletableDeferred<RegisterOutcome>()
+        pendingRegisters.add(PendingRegister(sessionId, action, deferred))
+        return deferred
     }
 
     override val latest: RobotState

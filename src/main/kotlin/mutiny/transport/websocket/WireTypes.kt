@@ -2,6 +2,7 @@ package mutiny.transport.websocket
 
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import mutiny.relay.RegisterOutcome
 import mutiny.relay.RobotAction
 import mutiny.relay.RobotState
 
@@ -33,7 +34,7 @@ data class Subscription(
 /** Inbound message from a client. Tagged by `type` for the client's decoder. */
 @Serializable
 sealed interface ClientMessage {
-    /** Carry out a single [RobotAction]. */
+    /** Carry out a single operate / deregister / CAN / SparkMax [RobotAction]. */
     @Serializable
     @SerialName("action")
     data class Action(val action: RobotAction) : ClientMessage
@@ -42,6 +43,18 @@ sealed interface ClientMessage {
     @Serializable
     @SerialName("actions")
     data class Actions(val actions: List<RobotAction>) : ClientMessage
+
+    /**
+     * Register a device as an RPC: the server replies with a matching
+     * [ServerMessage.RegisterResult] echoing [requestId] and carrying either the
+     * minted token or a structured error.
+     */
+    @Serializable
+    @SerialName("register")
+    data class Register(
+        val requestId: String,
+        val action: RobotAction,
+    ) : ClientMessage
 
     /** Replace this connection's [Subscription]. */
     @Serializable
@@ -56,4 +69,16 @@ sealed interface ServerMessage {
     @Serializable
     @SerialName("state")
     data class State(val state: RobotState) : ServerMessage
+
+    /**
+     * Reply to a [ClientMessage.Register], echoing the client's [requestId] and
+     * carrying the register [outcome] (minted token or structured error). Sent
+     * only to the session that issued the register — never broadcast.
+     */
+    @Serializable
+    @SerialName("registerResult")
+    data class RegisterResult(
+        val requestId: String,
+        val outcome: RegisterOutcome,
+    ) : ServerMessage
 }

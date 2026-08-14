@@ -12,10 +12,13 @@ import edu.wpi.first.wpilibj.DigitalOutput
 import edu.wpi.first.wpilibj.PWM
 import edu.wpi.first.wpilibj.RobotController
 import mutiny.relay.ApplyError.AllocationFailed
+import mutiny.relay.ApplyError.DeviceAlreadyRegistered
 import mutiny.relay.ApplyError.HardwareFault
 import mutiny.relay.ApplyError.InvalidCanByte
 import mutiny.relay.ApplyError.NotRegistered
 import mutiny.relay.ApplyError.OutOfRange
+import mutiny.relay.ApplyError.RobotDisabled
+import mutiny.relay.ApplyError.WrongDeviceMode
 import mutiny.relay.DeviceKind.ANALOG_INPUT
 import mutiny.relay.DeviceKind.ANALOG_OUTPUT
 import mutiny.relay.DeviceKind.CAN
@@ -23,6 +26,10 @@ import mutiny.relay.DeviceKind.DIGITAL_INPUT
 import mutiny.relay.DeviceKind.DIGITAL_OUTPUT
 import mutiny.relay.DeviceKind.PWM
 import mutiny.relay.DeviceKind.SPARKMAX
+import mutiny.relay.PwmMode.MOTOR
+import mutiny.relay.PwmMode.SERVO
+import mutiny.relay.RegisterOutcome.Error
+import mutiny.relay.RegisterOutcome.Ok
 import mutiny.relay.Snapshot.CanFrameSnapshot
 
 /** roboRIO analog output voltage range (per WPILib AnalogOutput spec). */
@@ -32,6 +39,9 @@ private const val ANALOG_OUT_MAX = 5.0
 /** Valid SparkMax setOutput input range */
 private const val SPARKMAX_OUT_MIN = -1.0
 private const val SPARKMAX_OUT_MAX = 1.0
+
+/** Sentinel `id` for an error about a token that resolves to no entry. */
+private const val UNKNOWN_ID = -1
 
 /**
  * Outcome of executing a single [RobotAction] against a [HardwareRegistry].
@@ -43,18 +53,65 @@ sealed interface ApplyOutcome {
     data class Failed(val error: ApplyError) : ApplyOutcome
 }
 
+/** Token-keyed registration of a PWM output, plus its port/mode. */
+internal data class PwmEntry(
+    val port: Int,
+    val mode: PwmMode,
+    val handle: PWM,
+)
+
+/** Token-keyed registration of a digital input, plus its channel. */
+internal data class DigitalInputEntry(
+    val channel: Int,
+    val handle: DigitalInput,
+)
+
+/** Token-keyed registration of a digital output, plus its channel. */
+internal data class DigitalOutputEntry(
+    val channel: Int,
+    val handle: DigitalOutput,
+)
+
+/** Token-keyed registration of an analog input, plus its channel. */
+internal data class AnalogInputEntry(
+    val channel: Int,
+    val handle: AnalogInput,
+)
+
+/** Token-keyed registration of an analog output, plus its channel. */
+internal data class AnalogOutputEntry(
+    val channel: Int,
+    val handle: AnalogOutput,
+)
+
 /**
- * Holds the live WPILib handles the relay has allocated. These are native,
- * mutable resources, so this is intentionally a plain class — not a data class,
- * since its generated [copy] would alias handles and risk a double-free — and it
- * is mutated only by the top-level [execute] function on the robot periodic thread.
+ * Holds the live WPILib handles the relay has allocated. Phase-1 device families
+ * (PWM / DIO / Analog) are token-keyed and session-owned: each registration
+ * mints an opaque [Token], recorded under the [SessionId] that issued it, and
+ * is released wholesale on disconnect via [releaseSession]. CAN and SparkMax
+ * remain on the legacy idempotent, port/id-keyed path during Phase 1.
+ *
+ * Native, mutable resources live here, so this is intentionally a plain class
+ * (not a data class — its `copy` would alias handles and risk a double-free),
+ * mutated only by the top-level [register] / [execute] / [releaseSession] /
+ * [close] functions on the robot periodic thread.
  */
 class HardwareRegistry {
-    internal val pwm = HashMap<Int, PWM>()
-    internal val digitalInputs = HashMap<Int, DigitalInput>()
-    internal val digitalOutputs = HashMap<Int, DigitalOutput>()
-    internal val analogInputs = HashMap<Int, AnalogInput>()
-    internal val analogOutputs = HashMap<Int, AnalogOutput>()
+    internal val pwm = HashMap<Token, PwmEntry>()
+    internal val digitalInputs = HashMap<Token, DigitalInputEntry>()
+    internal val digitalOutputs = HashMap<Token, DigitalOutputEntry>()
+    internal val analogInputs = HashMap<Token, AnalogInputEntry>()
+    internal val analogOutputs = HashMap<Token, AnalogOutputEntry>()
+
+    internal val pwmByPort = HashMap<Int, Token>()
+    internal val digitalInputsByChannel = HashMap<Int, Token>()
+    internal val digitalOutputsByChannel = HashMap<Int, Token>()
+    internal val analogInputsByChannel = HashMap<Int, Token>()
+    internal val analogOutputsByChannel = HashMap<Int, Token>()
+
+    internal val sessionTokens = HashMap<SessionId, MutableSet<Token>>()
+
+    // CAN + SparkMax stay port/id-based during Phase 1 (mixed model).
     internal val canDevices = HashMap<Int, CAN>()
     internal val canRxSubscriptions = ArrayList<Pair<Int, Int>>()
     internal val canBuffer = CANData()
@@ -62,73 +119,295 @@ class HardwareRegistry {
 }
 
 /**
- * Execute one [action] against [registry], mutating it in place. All inputs are
- * validated and every WPILib failure is classified into a structured
- * [ApplyError]; this function never throws.
+ * Allocate exclusively, mint a token, and record session ownership. Allocation
+ * is **not** gated by the disabled state — it is safe to register a device
+ * while the DS has the robot disabled (the HAL neutralizes outputs regardless).
+ *
+ * A second registration of a port/channel already held returns
+ * [DeviceAlreadyRegistered]; a WPILib allocation throw returns [AllocationFailed].
+ * CAN and SparkMax registration does **not** flow through here (they remain on
+ * the legacy idempotent [execute] path during Phase 1).
+ */
+fun register(
+    registry: HardwareRegistry,
+    session: SessionId,
+    action: RobotAction,
+): RegisterOutcome =
+    when (action) {
+        is RobotAction.RegisterPwm -> {
+            if (registry.pwmByPort.containsKey(action.port)) {
+                Error(DeviceAlreadyRegistered(PWM, action.port))
+            } else {
+                val handle =
+                    try {
+                        PWM(action.port)
+                    } catch (e: Exception) {
+                        return Error(AllocationFailed(PWM, action.port, e.describe()))
+                    }
+                installToken(
+                    registry,
+                    session,
+                    action.port,
+                    PwmEntry(action.port, action.mode, handle),
+                    registry.pwm,
+                    registry.pwmByPort,
+                )
+            }
+        }
+
+        is RobotAction.RegisterDigitalInput -> {
+            if (registry.digitalInputsByChannel.containsKey(action.channel)) {
+                Error(DeviceAlreadyRegistered(DIGITAL_INPUT, action.channel))
+            } else {
+                val handle =
+                    try {
+                        DigitalInput(action.channel)
+                    } catch (e: Exception) {
+                        return Error(AllocationFailed(DIGITAL_INPUT, action.channel, e.describe()))
+                    }
+                installToken(
+                    registry,
+                    session,
+                    action.channel,
+                    DigitalInputEntry(action.channel, handle),
+                    registry.digitalInputs,
+                    registry.digitalInputsByChannel,
+                )
+            }
+        }
+
+        is RobotAction.RegisterDigitalOutput -> {
+            if (registry.digitalOutputsByChannel.containsKey(action.channel)) {
+                Error(DeviceAlreadyRegistered(DIGITAL_OUTPUT, action.channel))
+            } else {
+                val handle =
+                    try {
+                        DigitalOutput(action.channel)
+                    } catch (e: Exception) {
+                        return Error(AllocationFailed(DIGITAL_OUTPUT, action.channel, e.describe()))
+                    }
+                installToken(
+                    registry,
+                    session,
+                    action.channel,
+                    DigitalOutputEntry(action.channel, handle),
+                    registry.digitalOutputs,
+                    registry.digitalOutputsByChannel,
+                )
+            }
+        }
+
+        is RobotAction.RegisterAnalogInput -> {
+            if (registry.analogInputsByChannel.containsKey(action.channel)) {
+                Error(DeviceAlreadyRegistered(ANALOG_INPUT, action.channel))
+            } else {
+                val handle =
+                    try {
+                        AnalogInput(action.channel)
+                    } catch (e: Exception) {
+                        return Error(AllocationFailed(ANALOG_INPUT, action.channel, e.describe()))
+                    }
+                installToken(
+                    registry,
+                    session,
+                    action.channel,
+                    AnalogInputEntry(action.channel, handle),
+                    registry.analogInputs,
+                    registry.analogInputsByChannel,
+                )
+            }
+        }
+
+        is RobotAction.RegisterAnalogOutput -> {
+            if (registry.analogOutputsByChannel.containsKey(action.channel)) {
+                Error(DeviceAlreadyRegistered(ANALOG_OUTPUT, action.channel))
+            } else {
+                val handle =
+                    try {
+                        AnalogOutput(action.channel)
+                    } catch (e: Exception) {
+                        return Error(AllocationFailed(ANALOG_OUTPUT, action.channel, e.describe()))
+                    }
+                installToken(
+                    registry,
+                    session,
+                    action.channel,
+                    AnalogOutputEntry(action.channel, handle),
+                    registry.analogOutputs,
+                    registry.analogOutputsByChannel,
+                )
+            }
+        }
+
+        // CAN / SparkMax register variants stay on the legacy execute path in Phase 1.
+        // Reaching register() with them is a client routing error.
+        is RobotAction.RegisterCanRx,
+        is RobotAction.RegisterBrushlessSparkMax,
+        -> Error(AllocationFailed(CAN, UNKNOWN_ID, "register variant sent via the register path is not supported"))
+
+        // Operate / deregister variants are handled by execute(); they should not
+        // arrive here. A misrouted operate is reported as a failure rather than
+        // silently dropped.
+        else -> Error(AllocationFailed(CAN, UNKNOWN_ID, "non-register action sent to register path"))
+    }
+
+/**
+ * Mint a fresh token for [entry], store it under [tokenMap] keyed by the new
+ * token, index [portOrChannel] under [byPort], and record the token under the
+ * session. Returns [Ok] of the minted token.
+ */
+private fun <E> installToken(
+    registry: HardwareRegistry,
+    session: SessionId,
+    portOrChannel: Int,
+    entry: E,
+    tokenMap: HashMap<Token, E>,
+    byPort: HashMap<Int, Token>,
+): RegisterOutcome {
+    val token = Token.random()
+    tokenMap[token] = entry
+    byPort[portOrChannel] = token
+    registry.sessionTokens.getOrPut(session) { HashSet() }.add(token)
+    return Ok(token)
+}
+
+/**
+ * Execute one operate / deregister / CAN / SparkMax [action] against [registry],
+ * mutating it in place. All inputs are validated and every WPILib failure is
+ * classified into a structured [ApplyError]; this function never throws.
+ *
+ * Operate actions (SetX / Disable / CanWrite / SparkMax set*) are **rejected
+ * while the DS has the robot disabled** ([enabled] == false) with a
+ * [RobotDisabled] error — no handle is touched. Register / deregister /
+ * subscribe-like actions (including CAN-Rx subscribe) are allowed while
+ * disabled. Phase-1 token families (PWM / DIO / Analog) resolve their device by
+ * [Token]; CAN and SparkMax stay on the legacy port/id path.
  */
 fun execute(
     registry: HardwareRegistry,
+    enabled: Boolean,
     action: RobotAction,
 ): ApplyOutcome =
     when (action) {
-        // PWM
-        is RobotAction.RegisterPwm ->
-            register(registry.pwm, action.port, PWM) { PWM(action.port) }
+        // ---------------------------------------------------------- PWM operate
+        is RobotAction.SetPwmSpeed -> {
+            if (!enabled) {
+                ApplyOutcome.Failed(RobotDisabled(PWM, registry.pwm[action.token]?.port ?: UNKNOWN_ID))
+            } else {
+                val entry = registry.pwm[action.token]
+                when {
+                    entry == null ->
+                        ApplyOutcome.Failed(NotRegistered(PWM, UNKNOWN_ID))
+                    entry.mode != MOTOR ->
+                        ApplyOutcome.Failed(
+                            WrongDeviceMode(PWM, entry.port, expected = MOTOR.name, actual = entry.mode.name),
+                        )
+                    action.speed !in -1.0..1.0 ->
+                        ApplyOutcome.Failed(OutOfRange(PWM, entry.port, "speed", action.speed, -1.0, 1.0))
+                    else -> runOperate(PWM, entry.port) { entry.handle.setSpeed(action.speed) }
+                }
+            }
+        }
+
+        is RobotAction.SetPwmPosition -> {
+            if (!enabled) {
+                ApplyOutcome.Failed(RobotDisabled(PWM, registry.pwm[action.token]?.port ?: UNKNOWN_ID))
+            } else {
+                val entry = registry.pwm[action.token]
+                when {
+                    entry == null ->
+                        ApplyOutcome.Failed(NotRegistered(PWM, UNKNOWN_ID))
+                    entry.mode != SERVO ->
+                        ApplyOutcome.Failed(
+                            WrongDeviceMode(PWM, entry.port, expected = SERVO.name, actual = entry.mode.name),
+                        )
+                    action.position !in 0.0..1.0 ->
+                        ApplyOutcome.Failed(OutOfRange(PWM, entry.port, "position", action.position, 0.0, 1.0))
+                    else -> runOperate(PWM, entry.port) { entry.handle.setPosition(action.position) }
+                }
+            }
+        }
+
+        is RobotAction.DisablePwm -> {
+            if (!enabled) {
+                ApplyOutcome.Failed(RobotDisabled(PWM, registry.pwm[action.token]?.port ?: UNKNOWN_ID))
+            } else {
+                val entry = registry.pwm[action.token]
+                if (entry == null) {
+                    ApplyOutcome.Failed(NotRegistered(PWM, UNKNOWN_ID))
+                } else {
+                    runOperate(PWM, entry.port) { entry.handle.setDisabled() }
+                }
+            }
+        }
+
         is RobotAction.DeregisterPwm ->
-            release(registry.pwm, action.port, PWM)
-        is RobotAction.SetPwmSpeed ->
-            if (action.speed !in -1.0..1.0) {
-                ApplyOutcome.Failed(OutOfRange(PWM, action.port, "speed", action.speed, -1.0, 1.0))
-            } else {
-                operate(registry.pwm, action.port, PWM) { it.setSpeed(action.speed) }
-            }
-        is RobotAction.SetPwmPosition ->
-            if (action.position !in 0.0..1.0) {
-                ApplyOutcome.Failed(OutOfRange(PWM, action.port, "position", action.position, 0.0, 1.0))
-            } else {
-                operate(registry.pwm, action.port, PWM) { it.setPosition(action.position) }
-            }
-        is RobotAction.DisablePwm ->
-            operate(registry.pwm, action.port, PWM) { it.setDisabled() }
+            releaseToken(registry.pwm, registry.pwmByPort, action.token, PWM) { it.port to it.handle }
 
-        // Digital IO
-        is RobotAction.RegisterDigitalInput ->
-            register(registry.digitalInputs, action.channel, DIGITAL_INPUT) { DigitalInput(action.channel) }
-        is RobotAction.RegisterDigitalOutput ->
-            register(registry.digitalOutputs, action.channel, DIGITAL_OUTPUT) { DigitalOutput(action.channel) }
-        is RobotAction.DeregisterDigitalInput ->
-            release(registry.digitalInputs, action.channel, DIGITAL_INPUT)
-        is RobotAction.DeregisterDigitalOutput ->
-            release(registry.digitalOutputs, action.channel, DIGITAL_OUTPUT)
-        is RobotAction.SetDigitalOutput ->
-            operate(registry.digitalOutputs, action.channel, DIGITAL_OUTPUT) { it.set(action.value) }
-
-        // Analog IO
-        is RobotAction.RegisterAnalogInput ->
-            register(registry.analogInputs, action.channel, ANALOG_INPUT) { AnalogInput(action.channel) }
-        is RobotAction.RegisterAnalogOutput ->
-            register(registry.analogOutputs, action.channel, ANALOG_OUTPUT) { AnalogOutput(action.channel) }
-        is RobotAction.DeregisterAnalogInput ->
-            release(registry.analogInputs, action.channel, ANALOG_INPUT)
-        is RobotAction.DeregisterAnalogOutput ->
-            release(registry.analogOutputs, action.channel, ANALOG_OUTPUT)
-        is RobotAction.SetAnalogOutput ->
-            if (action.voltage !in ANALOG_OUT_MIN..ANALOG_OUT_MAX) {
+        // ---------------------------------------------------- DIO operate/dereg
+        is RobotAction.SetDigitalOutput -> {
+            if (!enabled) {
                 ApplyOutcome.Failed(
-                    OutOfRange(
-                        ANALOG_OUTPUT,
-                        action.channel,
-                        "voltage",
-                        action.voltage,
-                        ANALOG_OUT_MIN,
-                        ANALOG_OUT_MAX,
-                    ),
+                    RobotDisabled(DIGITAL_OUTPUT, registry.digitalOutputs[action.token]?.channel ?: UNKNOWN_ID),
                 )
             } else {
-                operate(registry.analogOutputs, action.channel, ANALOG_OUTPUT) { it.setVoltage(action.voltage) }
+                val entry = registry.digitalOutputs[action.token]
+                if (entry == null) {
+                    ApplyOutcome.Failed(NotRegistered(DIGITAL_OUTPUT, UNKNOWN_ID))
+                } else {
+                    runOperate(DIGITAL_OUTPUT, entry.channel) { entry.handle.set(action.value) }
+                }
+            }
+        }
+
+        is RobotAction.DeregisterDigitalInput ->
+            releaseToken(registry.digitalInputs, registry.digitalInputsByChannel, action.token, DIGITAL_INPUT) {
+                it.channel to it.handle
             }
 
-        // CAN
+        is RobotAction.DeregisterDigitalOutput ->
+            releaseToken(registry.digitalOutputs, registry.digitalOutputsByChannel, action.token, DIGITAL_OUTPUT) {
+                it.channel to it.handle
+            }
+
+        // ------------------------------------------------ Analog operate/dereg
+        is RobotAction.SetAnalogOutput -> {
+            if (!enabled) {
+                ApplyOutcome.Failed(
+                    RobotDisabled(ANALOG_OUTPUT, registry.analogOutputs[action.token]?.channel ?: UNKNOWN_ID),
+                )
+            } else {
+                val entry = registry.analogOutputs[action.token]
+                when {
+                    entry == null ->
+                        ApplyOutcome.Failed(NotRegistered(ANALOG_OUTPUT, UNKNOWN_ID))
+                    action.voltage !in ANALOG_OUT_MIN..ANALOG_OUT_MAX ->
+                        ApplyOutcome.Failed(
+                            OutOfRange(
+                                ANALOG_OUTPUT,
+                                entry.channel,
+                                "voltage",
+                                action.voltage,
+                                ANALOG_OUT_MIN,
+                                ANALOG_OUT_MAX,
+                            ),
+                        )
+                    else -> runOperate(ANALOG_OUTPUT, entry.channel) { entry.handle.setVoltage(action.voltage) }
+                }
+            }
+        }
+
+        is RobotAction.DeregisterAnalogInput ->
+            releaseToken(registry.analogInputs, registry.analogInputsByChannel, action.token, ANALOG_INPUT) {
+                it.channel to it.handle
+            }
+
+        is RobotAction.DeregisterAnalogOutput ->
+            releaseToken(registry.analogOutputs, registry.analogOutputsByChannel, action.token, ANALOG_OUTPUT) {
+                it.channel to it.handle
+            }
+
+        // --------------------------------------------------------------- CAN
         is RobotAction.RegisterCanRx -> {
             val outcome = register(registry.canDevices, action.messageId, CAN) { CAN(action.messageId) }
             if (outcome is ApplyOutcome.Applied) {
@@ -136,21 +415,26 @@ fun execute(
             }
             outcome
         }
+
         is RobotAction.DeregisterCanRx -> {
             registry.canRxSubscriptions.remove(action.messageId to action.apiId)
             ApplyOutcome.Applied
         }
-        is RobotAction.CanWrite -> {
-            val bad = action.data.withIndex().firstOrNull { it.value !in 0..255 }
-            if (bad != null) {
-                ApplyOutcome.Failed(InvalidCanByte(action.messageId, bad.index, bad.value))
-            } else {
-                writeCan(registry, action.messageId, action.apiId, action.data.toWireBytes())
-            }
-        }
 
-        // SPARK MAX
-        is RobotAction.RegisterBrushlessSparkMax -> {
+        is RobotAction.CanWrite ->
+            if (!enabled) {
+                ApplyOutcome.Failed(RobotDisabled(CAN, action.messageId))
+            } else {
+                val bad = action.data.withIndex().firstOrNull { it.value !in 0..255 }
+                if (bad != null) {
+                    ApplyOutcome.Failed(InvalidCanByte(action.messageId, bad.index, bad.value))
+                } else {
+                    writeCan(registry, action.messageId, action.apiId, action.data.toWireBytes())
+                }
+            }
+
+        // ---------------------------------------------------------- SPARK MAX
+        is RobotAction.RegisterBrushlessSparkMax ->
             registerWithVerify(
                 map = registry.sparkMaxDevices,
                 id = action.deviceId,
@@ -172,11 +456,14 @@ fun execute(
                     sparkMaxDevice.close()
                 },
             )
-        }
+
         is RobotAction.DeregisterSparkMax ->
             release(registry.sparkMaxDevices, action.deviceId, SPARKMAX)
+
         is RobotAction.SetSparkMaxOutput ->
-            if (action.output !in SPARKMAX_OUT_MIN..SPARKMAX_OUT_MAX) {
+            if (!enabled) {
+                ApplyOutcome.Failed(RobotDisabled(SPARKMAX, action.deviceId))
+            } else if (action.output !in SPARKMAX_OUT_MIN..SPARKMAX_OUT_MAX) {
                 ApplyOutcome.Failed(
                     OutOfRange(
                         SPARKMAX,
@@ -190,12 +477,28 @@ fun execute(
             } else {
                 operate(registry.sparkMaxDevices, action.deviceId, SPARKMAX) { it.set(action.output) }
             }
+
         is RobotAction.SetSparkMaxVoltage ->
-            operate(registry.sparkMaxDevices, action.deviceId, SPARKMAX) { it.setVoltage(action.voltage) }
+            if (!enabled) {
+                ApplyOutcome.Failed(RobotDisabled(SPARKMAX, action.deviceId))
+            } else {
+                operate(registry.sparkMaxDevices, action.deviceId, SPARKMAX) { it.setVoltage(action.voltage) }
+            }
+
+        // Phase-1 token registers route through register(); reaching execute()
+        // with one is a client routing error.
+        is RobotAction.RegisterPwm,
+        is RobotAction.RegisterDigitalInput,
+        is RobotAction.RegisterDigitalOutput,
+        is RobotAction.RegisterAnalogInput,
+        is RobotAction.RegisterAnalogOutput,
+        ->
+            ApplyOutcome.Failed(
+                AllocationFailed(CAN, UNKNOWN_ID, "register action sent via the operate path"),
+            )
     }
 
 /** Build an immutable snapshot of every input and commanded output in [registry]. */
-// TODO: add sparkmax snapshots, although I doubt we'll be using them in season so maybe not necessary
 fun sample(
     registry: HardwareRegistry,
     sequence: Long,
@@ -207,16 +510,16 @@ fun sample(
     emergencyStopped: Boolean,
     errors: List<ActionError>,
 ): RobotState {
-    val analogIn = registry.analogInputs.mapValues { it.value.voltage }
-    val analogOut = registry.analogOutputs.mapValues { it.value.voltage }
-    val digitalIn = registry.digitalInputs.mapValues { it.value.get() }
-    val digitalOut = registry.digitalOutputs.mapValues { it.value.get() }
-    val pwmSpeed = registry.pwm.mapValues { it.value.speed }
-    val pwmPosition = registry.pwm.mapValues { it.value.position }
+    // Token-keyed internally, but re-keyed by port/channel for the snapshot so
+    // the RobotState shape (and subscription filtering) is unchanged.
+    val analogIn = registry.analogInputs.values.associateBy({ it.channel }, { it.handle.voltage })
+    val analogOut = registry.analogOutputs.values.associateBy({ it.channel }, { it.handle.voltage })
+    val digitalIn = registry.digitalInputs.values.associateBy({ it.channel }, { it.handle.get() })
+    val digitalOut = registry.digitalOutputs.values.associateBy({ it.channel }, { it.handle.get() })
+    val pwmSpeed = registry.pwm.values.associateBy({ it.port }, { it.handle.speed })
+    val pwmPosition = registry.pwm.values.associateBy({ it.port }, { it.handle.position })
     val sparkMaxSnapshots =
         registry.sparkMaxDevices.mapValues {
-            // TODO: Decide whether to keep native motor units or choose
-            //      consistent units to send to the client across all vendors?
             val position = it.value.encoder.position
             val positionError = it.value.lastError
             val positionStatus =
@@ -237,14 +540,12 @@ fun sample(
             val timestampSeconds = RobotController.getFPGATime() / 1_000_000.0
 
             Snapshot.SparkMaxSnapshot(
-                // Number of motor rotations
                 position =
                     SignalSample(
                         value = position,
                         timestampSeconds = timestampSeconds,
                         status = positionStatus,
                     ),
-                // Motor RPM
                 velocity =
                     SignalSample(
                         value = velocity,
@@ -292,20 +593,61 @@ fun sample(
     )
 }
 
+/**
+ * Release every device owned by [session] (called on WebSocket disconnect).
+ * Closes the WPILib handles, drops the token + port/channel indices. Tokens the
+ * session minted become invalid; a fresh registration by any session can now
+ * claim the freed ports/channels.
+ */
+fun releaseSession(
+    registry: HardwareRegistry,
+    session: SessionId,
+) {
+    val tokens = registry.sessionTokens.remove(session) ?: return
+    for (token in tokens) {
+        registry.pwm.remove(token)?.let { entry ->
+            runCatching { entry.handle.close() }
+            registry.pwmByPort.remove(entry.port)
+        }
+        registry.digitalInputs.remove(token)?.let { entry ->
+            runCatching { entry.handle.close() }
+            registry.digitalInputsByChannel.remove(entry.channel)
+        }
+        registry.digitalOutputs.remove(token)?.let { entry ->
+            runCatching { entry.handle.close() }
+            registry.digitalOutputsByChannel.remove(entry.channel)
+        }
+        registry.analogInputs.remove(token)?.let { entry ->
+            runCatching { entry.handle.close() }
+            registry.analogInputsByChannel.remove(entry.channel)
+        }
+        registry.analogOutputs.remove(token)?.let { entry ->
+            runCatching { entry.handle.close() }
+            registry.analogOutputsByChannel.remove(entry.channel)
+        }
+    }
+}
+
 /** Release every allocated WPILib handle in [registry]. */
 fun close(registry: HardwareRegistry) {
-    registry.pwm.values.forEach { it.close() }
-    registry.digitalInputs.values.forEach { it.close() }
-    registry.digitalOutputs.values.forEach { it.close() }
-    registry.analogInputs.values.forEach { it.close() }
-    registry.analogOutputs.values.forEach { it.close() }
-    registry.canDevices.values.forEach { it.close() }
-    registry.sparkMaxDevices.values.forEach { it.close() }
+    registry.pwm.values.forEach { runCatching { it.handle.close() } }
+    registry.digitalInputs.values.forEach { runCatching { it.handle.close() } }
+    registry.digitalOutputs.values.forEach { runCatching { it.handle.close() } }
+    registry.analogInputs.values.forEach { runCatching { it.handle.close() } }
+    registry.analogOutputs.values.forEach { runCatching { it.handle.close() } }
+    registry.canDevices.values.forEach { runCatching { it.close() } }
+    registry.sparkMaxDevices.values.forEach { runCatching { it.close() } }
     registry.pwm.clear()
     registry.digitalInputs.clear()
     registry.digitalOutputs.clear()
     registry.analogInputs.clear()
     registry.analogOutputs.clear()
+    registry.pwmByPort.clear()
+    registry.digitalInputsByChannel.clear()
+    registry.digitalOutputsByChannel.clear()
+    registry.analogInputsByChannel.clear()
+    registry.analogOutputsByChannel.clear()
+    registry.sessionTokens.clear()
     registry.canDevices.clear()
     registry.canRxSubscriptions.clear()
     registry.sparkMaxDevices.clear()
@@ -339,7 +681,7 @@ private fun canFor(
     messageId: Int,
 ): CAN = registry.canDevices.getOrPut(messageId) { CAN(messageId) }
 
-/** Allocate (idempotently) a device, classifying a WPILib throw as [AllocationFailed]. */
+/** Allocate (idempotently) a legacy CAN device, classifying a WPILib throw as [AllocationFailed]. */
 private inline fun <T> register(
     map: MutableMap<Int, T>,
     id: Int,
@@ -386,13 +728,14 @@ private inline fun <T> registerWithVerify(
                 map[id] = device
                 return outcome
             }
+
             is ApplyOutcome.Failed -> {
                 try {
                     onRejected(device)
                 } catch (e: Exception) {
                     println(
                         "Failed to clean up " +
-                            "$deviceKind $id: ${e.describe()}" + "that did not pass verification",
+                            "$deviceKind $id: ${e.describe()} that did not pass verification",
                     )
                 }
                 return outcome
@@ -401,7 +744,7 @@ private inline fun <T> registerWithVerify(
     }
 }
 
-/** Run [block] on a registered device, or report it [NotRegistered] / [HardwareFault]. */
+/** Run [block] on a registered legacy device, or report it [NotRegistered] / [HardwareFault]. */
 private inline fun <T> operate(
     map: Map<Int, T>,
     id: Int,
@@ -417,7 +760,39 @@ private inline fun <T> operate(
     }
 }
 
-/** Remove and close a device if present (idempotent). */
+/** Run [block] on a registered handle, classifying a throw as [HardwareFault]. */
+private inline fun runOperate(
+    deviceKind: DeviceKind,
+    id: Int,
+    block: () -> Unit,
+): ApplyOutcome =
+    try {
+        block()
+        ApplyOutcome.Applied
+    } catch (e: Exception) {
+        ApplyOutcome.Failed(HardwareFault(deviceKind, id, e.describe()))
+    }
+
+/** Remove, close, and de-index a token-keyed device if present (idempotent). */
+private inline fun <E> releaseToken(
+    tokenMap: MutableMap<Token, E>,
+    byPort: MutableMap<Int, Token>,
+    token: Token,
+    deviceKind: DeviceKind,
+    entryIdAndHandle: (E) -> Pair<Int, AutoCloseable>,
+): ApplyOutcome {
+    val entry = tokenMap.remove(token) ?: return ApplyOutcome.Applied
+    val (id, handle) = entryIdAndHandle(entry)
+    byPort.remove(id)
+    return try {
+        handle.close()
+        ApplyOutcome.Applied
+    } catch (e: Exception) {
+        ApplyOutcome.Failed(HardwareFault(deviceKind, id, e.describe()))
+    }
+}
+
+/** Remove and close a legacy device if present (idempotent). */
 private fun <T : AutoCloseable> release(
     map: MutableMap<Int, T>,
     id: Int,

@@ -64,7 +64,8 @@ fun start(server: WebSocketRelayServer): WebSocketRelayServer {
             }
         }.start(wait = false)
     println(
-        "[WebSocketRelayServer] listening on ws://${server.host}:${server.port}$PATH (push every ${server.pushPeriodMs}ms)",
+        "[WebSocketRelayServer] listening on ws://${server.host}:${server.port}$PATH" +
+            " (push every ${server.pushPeriodMs}ms)",
     )
     return server.copy(engine = engine)
 }
@@ -78,6 +79,7 @@ private suspend fun handleSession(
     server: WebSocketRelayServer,
     session: DefaultWebSocketServerSession,
 ) {
+    val sessionId = server.networkProvider.openSession()
     val subscription = AtomicReference(Subscription.ALL)
     val sender =
         session.launch {
@@ -96,15 +98,18 @@ private suspend fun handleSession(
         }
     try {
         for (frame in session.incoming) {
-            if (frame is Frame.Text) handleText(server, frame.readText(), subscription)
+            if (frame is Frame.Text) handleText(server, session, sessionId, frame.readText(), subscription)
         }
     } finally {
         sender.cancel()
+        server.networkProvider.closeSession(sessionId)
     }
 }
 
-private fun handleText(
+private suspend fun handleText(
     server: WebSocketRelayServer,
+    session: DefaultWebSocketServerSession,
+    sessionId: mutiny.relay.SessionId,
     text: String,
     subscription: AtomicReference<Subscription>,
 ) {
@@ -116,8 +121,30 @@ private fun handleText(
             return
         }
     when (message) {
-        is ClientMessage.Action -> server.networkProvider.submit(message.action)
-        is ClientMessage.Actions -> server.networkProvider.submitAll(message.actions)
+        is ClientMessage.Action -> server.networkProvider.submitAction(sessionId, message.action)
+        is ClientMessage.Actions ->
+            message.actions.forEach {
+                server.networkProvider.submitAction(sessionId, it)
+            }
+
+        is ClientMessage.Register -> {
+            // RPC: await the register outcome on the periodic loop, then reply
+            // only to this session with the echoed requestId.
+            val outcome = server.networkProvider.submitRegister(sessionId, message.action).await()
+            try {
+                session.send(
+                    Frame.Text(
+                        json.encodeToString(
+                            ServerMessage.serializer(),
+                            ServerMessage.RegisterResult(message.requestId, outcome),
+                        ),
+                    ),
+                )
+            } catch (e: Throwable) {
+                // Client gone; the receive loop / close path will tear us down.
+            }
+        }
+
         is ClientMessage.Subscribe -> subscription.set(message.subscription)
     }
 }

@@ -85,4 +85,30 @@ sealed interface ApplyError {
         override val id: Int,
         val detail: String,
     ) : ApplyError
+
+    /** A register action targeted a port/channel already held by a registration. */
+    @Serializable
+    @SerialName("alreadyRegistered")
+    data class DeviceAlreadyRegistered(
+        override val deviceKind: DeviceKind,
+        override val id: Int,
+    ) : ApplyError
+
+    /** An operate action's token did not match the device's registered mode. */
+    @Serializable
+    @SerialName("wrongMode")
+    data class WrongDeviceMode(
+        override val deviceKind: DeviceKind,
+        override val id: Int,
+        val expected: String,
+        val actual: String,
+    ) : ApplyError
+
+    /** An operate action was rejected because the DS has the robot disabled. */
+    @Serializable
+    @SerialName("robotDisabled")
+    data class RobotDisabled(
+        override val deviceKind: DeviceKind,
+        override val id: Int,
+    ) : ApplyError
 }
