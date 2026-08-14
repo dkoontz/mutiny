@@ -7,7 +7,7 @@ import kotlinx.coroutines.CompletableDeferred
  * protobuf / zmq / ...) so that transport can push [RobotAction]s into the relay
  * and pull [RobotState] out, with no knowledge of WPILib.
  *
- * Phase 1 introduces connection-awareness: every WebSocket connection opens a
+ * The provider is connection-aware: every WebSocket connection opens a
  * [SessionId] via [openSession] and closes it via [closeSession] (which releases
  * every device that session registered). Registration is an RPC —
  * [submitRegister] returns a [CompletableDeferred] that completes with a
@@ -27,7 +27,7 @@ interface NetworkProvider {
     /** Release every device owned by [id] and drop the session. */
     fun closeSession(id: SessionId)
 
-    /** Enqueue an operate / deregister / CAN / SparkMax action for the periodic loop. */
+    /** Enqueue an operate / deregister action for the periodic loop. */
     fun submitAction(
         sessionId: SessionId,
         action: RobotAction,

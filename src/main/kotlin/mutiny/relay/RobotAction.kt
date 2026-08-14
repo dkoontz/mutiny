@@ -113,7 +113,10 @@ sealed interface RobotAction {
 
     // --------------------------------------------------------------- CAN
 
-    /** Begin sampling the latest frame for (messageId, apiId) into the snapshot. */
+    /**
+     * Begin sampling the latest frame for (messageId, apiId) into the snapshot.
+     * Registrations are exclusive per (messageId, apiId) pair and mint a token.
+     */
     @Serializable
     @SerialName("can.registerRx")
     data class RegisterCanRx(
@@ -124,13 +127,13 @@ sealed interface RobotAction {
     @Serializable
     @SerialName("can.deregisterRx")
     data class DeregisterCanRx(
-        val messageId: Int,
-        val apiId: Int,
+        val token: Token,
     ) : RobotAction
 
     /**
      * Write a CAN frame. [data] bytes are each 0-255; values outside that range
-     * are masked to their low 8 bits.
+     * are masked to their low 8 bits. Writes are fire-and-forget operates and
+     * do not require a registration.
      */
     @Serializable
     @SerialName("can.write")
@@ -153,7 +156,7 @@ sealed interface RobotAction {
     @Serializable
     @SerialName("sparkmax.deregister")
     data class DeregisterSparkMax(
-        val deviceId: Int,
+        val token: Token,
     ) : RobotAction
 
     /** @param output corresponds to a normalized voltage from -1.0 to 1.0 where -1.0 represents the full
@@ -163,14 +166,14 @@ sealed interface RobotAction {
     @Serializable
     @SerialName("sparkmax.setOutput")
     data class SetSparkMaxOutput(
-        val deviceId: Int,
+        val token: Token,
         val output: Double,
     ) : RobotAction
 
     @Serializable
     @SerialName("sparkmax.setVoltage")
     data class SetSparkMaxVoltage(
-        val deviceId: Int,
+        val token: Token,
         val voltage: Double,
     ) : RobotAction
 }

@@ -3,6 +3,7 @@ package mutiny.relay
 import edu.wpi.first.hal.HAL
 import mutiny.relay.ApplyError.AllocationFailed
 import mutiny.relay.ApplyError.DeviceAlreadyRegistered
+import mutiny.relay.ApplyError.InvalidCanByte
 import mutiny.relay.ApplyError.RobotDisabled
 import mutiny.relay.ApplyError.WrongDeviceMode
 import mutiny.relay.PwmMode.MOTOR
@@ -16,9 +17,10 @@ import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 
 /**
- * Unit coverage for the Phase-1 token model: exclusive registration, token
- * minting, session-owned release, mode validation, and the disabled-operate
- * gate. The sim HAL is initialized so PWM/DIO allocation works on the JVM.
+ * Unit coverage for the token registration model: exclusive registration, token
+ * minting, session-owned release, mode validation, the disabled-operate gate,
+ * and the CAN / SparkMax token paths. The sim HAL is initialized so
+ * PWM/DIO/CAN allocation works on the JVM.
  */
 class HardwareRegistryTest {
     private lateinit var registry: HardwareRegistry
@@ -159,8 +161,132 @@ class HardwareRegistryTest {
         assertTrue((outcome as ApplyOutcome.Failed).error is AllocationFailed)
     }
 
+    // ------------------------------------------------------------------ CAN
+
+    @Test
+    fun `RegisterCanRx mints a token for a free frame id`() {
+        val outcome = register(registry, session, RobotAction.RegisterCanRx(CAN_MSG, CAN_API))
+
+        assertTrue(outcome is Ok)
+        assertTrue((outcome as Ok).token.value.isNotBlank())
+    }
+
+    @Test
+    fun `a second registration of an in-use frame id is rejected as DeviceAlreadyRegistered`() {
+        register(registry, session, RobotAction.RegisterCanRx(CAN_MSG, CAN_API))
+
+        val second = register(registry, other, RobotAction.RegisterCanRx(CAN_MSG, CAN_API))
+
+        assertTrue(second is RegisterOutcome.Error)
+        val err = (second as RegisterOutcome.Error).error
+        assertTrue(err is DeviceAlreadyRegistered)
+        assertEquals(CAN_MSG, (err as DeviceAlreadyRegistered).id)
+    }
+
+    @Test
+    fun `distinct api ids on the same message id mint coexisting tokens`() {
+        val a = register(registry, session, RobotAction.RegisterCanRx(CAN_MSG, CAN_API))
+        val b = register(registry, session, RobotAction.RegisterCanRx(CAN_MSG, CAN_API + 1))
+
+        assertTrue(a is Ok)
+        assertTrue(b is Ok)
+        assertNotEquals((a as Ok).token, (b as Ok).token)
+    }
+
+    @Test
+    fun `DeregisterCanRx by token frees the frame id for re-registration`() {
+        val token = (register(registry, session, RobotAction.RegisterCanRx(CAN_MSG, CAN_API)) as Ok).token
+
+        val outcome = execute(registry, enabled = true, RobotAction.DeregisterCanRx(token))
+        assertTrue(outcome is ApplyOutcome.Applied)
+
+        val reclaimed = register(registry, other, RobotAction.RegisterCanRx(CAN_MSG, CAN_API))
+        assertTrue(reclaimed is Ok)
+    }
+
+    @Test
+    fun `DeregisterCanRx with an unknown token is idempotent`() {
+        val outcome = execute(registry, enabled = true, RobotAction.DeregisterCanRx(Token("nope")))
+
+        assertTrue(outcome is ApplyOutcome.Applied)
+    }
+
+    @Test
+    fun `releaseSession frees the session CAN subscriptions`() {
+        register(registry, session, RobotAction.RegisterCanRx(CAN_MSG, CAN_API))
+
+        releaseSession(registry, session)
+
+        val reclaimed = register(registry, other, RobotAction.RegisterCanRx(CAN_MSG, CAN_API))
+        assertTrue(reclaimed is Ok)
+    }
+
+    @Test
+    fun `CanWrite with an out-of-range byte is InvalidCanByte`() {
+        val outcome =
+            execute(registry, enabled = true, RobotAction.CanWrite(CAN_MSG, CAN_API, data = listOf(0, 256)))
+
+        assertTrue(outcome is ApplyOutcome.Failed)
+        assertTrue((outcome as ApplyOutcome.Failed).error is InvalidCanByte)
+    }
+
+    @Test
+    fun `CanWrite is rejected as RobotDisabled when disabled`() {
+        val outcome =
+            execute(registry, enabled = false, RobotAction.CanWrite(CAN_MSG, CAN_API, data = listOf(1)))
+
+        assertTrue(outcome is ApplyOutcome.Failed)
+        assertTrue((outcome as ApplyOutcome.Failed).error is RobotDisabled)
+    }
+
+    @Test
+    fun `a RegisterCanRx sent via the operate path is a failure`() {
+        val outcome = execute(registry, enabled = true, RobotAction.RegisterCanRx(CAN_MSG, CAN_API))
+
+        assertTrue(outcome is ApplyOutcome.Failed)
+        assertTrue((outcome as ApplyOutcome.Failed).error is AllocationFailed)
+    }
+
+    // ------------------------------------------------------------- SPARK MAX
+
+    @Test
+    fun `a RegisterBrushlessSparkMax sent via the operate path is a failure`() {
+        val outcome = execute(registry, enabled = true, RobotAction.RegisterBrushlessSparkMax(DEVICE_ID))
+
+        assertTrue(outcome is ApplyOutcome.Failed)
+        assertTrue((outcome as ApplyOutcome.Failed).error is AllocationFailed)
+    }
+
+    @Test
+    fun `SetSparkMaxOutput with an unknown token is NotRegistered`() {
+        val outcome =
+            execute(registry, enabled = true, RobotAction.SetSparkMaxOutput(Token("nope"), output = 0.5))
+
+        assertTrue(outcome is ApplyOutcome.Failed)
+        assertTrue((outcome as ApplyOutcome.Failed).error is ApplyError.NotRegistered)
+    }
+
+    @Test
+    fun `SetSparkMaxVoltage with an unknown token is NotRegistered`() {
+        val outcome =
+            execute(registry, enabled = true, RobotAction.SetSparkMaxVoltage(Token("nope"), voltage = 6.0))
+
+        assertTrue(outcome is ApplyOutcome.Failed)
+        assertTrue((outcome as ApplyOutcome.Failed).error is ApplyError.NotRegistered)
+    }
+
+    @Test
+    fun `DeregisterSparkMax with an unknown token is idempotent`() {
+        val outcome = execute(registry, enabled = true, RobotAction.DeregisterSparkMax(Token("nope")))
+
+        assertTrue(outcome is ApplyOutcome.Applied)
+    }
+
     private companion object {
         const val PORT_1 = 1
         const val PORT_2 = 2
+        const val CAN_MSG = 0x205
+        const val CAN_API = 0
+        const val DEVICE_ID = 1
     }
 }

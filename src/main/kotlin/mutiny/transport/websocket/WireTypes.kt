@@ -34,7 +34,7 @@ data class Subscription(
 /** Inbound message from a client. Tagged by `type` for the client's decoder. */
 @Serializable
 sealed interface ClientMessage {
-    /** Carry out a single operate / deregister / CAN / SparkMax [RobotAction]. */
+    /** Carry out a single operate / deregister [RobotAction]. */
     @Serializable
     @SerialName("action")
     data class Action(val action: RobotAction) : ClientMessage

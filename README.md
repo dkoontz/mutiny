@@ -72,12 +72,12 @@ Client ◀──(JSON)── Transport (WebSocket) ◀──(RobotState)── N
 | File | Role |
 |------|------|
 | `Main.kt` | Entry point — wires transport to relay, hands to WPILib |
-| `NetworkProvider.kt` | Interface — `submit(action)`, `latest` snapshot |
-| `TimedRobotRelay.kt` | Core loop — drains actions, executes, samples |
+| `NetworkProvider.kt` | Interface — sessions, register RPC, action queue, `latest` snapshot |
+| `TimedRobotRelay.kt` | Core loop — drains registers + actions, executes, samples |
 | `RobotAction.kt` | Sealed interface — every command the relay understands |
 | `ApplyError.kt` | Sealed interface — structured errors (no exceptions escape) |
 | `RobotState.kt` | Immutable snapshot of all device state |
-| `HardwareRegistry.kt` | Mutable bag of live WPILib handles + `execute()`/`sample()` |
+| `HardwareRegistry.kt` | Token-keyed live WPILib handles + `register()`/`execute()`/`sample()` |
 | `WebSocketRelayServer.kt` | Ktor WebSocket transport |
 | `WireTypes.kt` | Client/server message DTOs and subscription filtering |
 
@@ -119,7 +119,7 @@ Transports live under `src/main/kotlin/mutiny/transport/`. They depend only on t
    class ZmqRelayServer(val networkProvider: NetworkProvider, val port: Int = 5801)
    ```
 
-3. **Ingress:** Receive messages from your transport, deserialize to `RobotAction`, call `networkProvider.submit(action)` (or `submitAll` for batches).
+3. **Ingress:** Receive messages from your transport, deserialize to `RobotAction`, call `networkProvider.submitAction(sessionId, action)` for operates (or `submitRegister(sessionId, action)` for the register RPC, which replies with a minted token).
 
 4. **Egress:** Periodically poll `networkProvider.latest` and send the `RobotState` snapshot to clients. Optionally implement subscription filtering (see `WebSocketRelayServer.kt:126-142` for the pattern).
 
@@ -135,22 +135,42 @@ Transports live under `src/main/kotlin/mutiny/transport/`. They depend only on t
 
 ## Adding a New RobotAction
 
-1. **Add a variant** to `RobotAction.kt`:
+1. **Add register / operate variants** to `RobotAction.kt`. A registration
+   identifies the device by port / channel / id; the reply mints an opaque
+   `Token` that later operate / deregister actions carry in its place:
    ```kotlin
    @Serializable
+   @SerialName("relay.registerOutput")
+   data class RegisterRelayOutput(val channel: Int) : RobotAction
+
+   @Serializable
    @SerialName("relay.setForward")
-   data class SetRelayForward(val channel: Int, val on: Boolean) : RobotAction
+   data class SetRelayForward(val token: Token, val on: Boolean) : RobotAction
    ```
 
 2. **Add a `DeviceKind`** in `ApplyError.kt` (e.g. `RELAY`).
 
-3. **Add a device map** in `HardwareRegistry.kt` (e.g. `internal val relays = HashMap<Int, Relay>()`) and update the `close()` method to clear it.
+3. **Add an entry + maps** in `HardwareRegistry.kt` — one token-keyed map of
+   entries, one reverse index by port/channel/id, and cleanup in
+   `releaseSession()` and `close()`:
+   ```kotlin
+   internal val relayOutputs = HashMap<Token, RelayOutputEntry>()
+   internal val relayOutputsByChannel = HashMap<Int, Token>()
+   ```
 
-4. **Add an `execute` branch** in `HardwareRegistry.kt:execute()` — use the existing helpers `register()`, `release()`, or `operate()`. Validate ranges before operating.
+4. **Add a `register()` branch** in `HardwareRegistry.kt` — reject an in-use
+   port/channel with `DeviceAlreadyRegistered`, wrap the WPILib allocation in a
+   try/catch (`AllocationFailed`), then `installToken(...)`.
 
-5. **Add sampling** in `HardwareRegistry.kt:sample()` to read the new device's state. If new fields are needed on `RobotState`, add them there and to the `EMPTY` companion.
+5. **Add an `execute()` branch** for the operate / deregister variants — resolve
+   the entry by token (`NotRegistered` if absent), validate ranges before
+   operating, and reject operates while disabled with `RobotDisabled`.
 
-6. (Optional) Add a field to `Subscription` in `WireTypes.kt` and update the `filter()` function if you want clients to be able to filter the new data.
+6. **Add sampling** in `HardwareRegistry.kt:sample()` to read the new device's
+   state. If new fields are needed on `RobotState`, add them there and to the
+   `EMPTY` companion.
+
+7. (Optional) Add a field to `Subscription` in `WireTypes.kt` and update the `filter()` function if you want clients to be able to filter the new data.
 
 No codec changes are needed — `@Serializable` and `@SerialName` annotations on the variant automatically handle JSON serialization.
 
