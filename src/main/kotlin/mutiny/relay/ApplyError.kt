@@ -13,6 +13,8 @@ enum class DeviceKind {
     ANALOG_OUTPUT,
     CAN,
     SPARKMAX,
+    TALONFXS,
+    TALONFX,
 }
 
 /**

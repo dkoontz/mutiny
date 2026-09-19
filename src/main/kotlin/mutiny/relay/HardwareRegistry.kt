@@ -1,5 +1,8 @@
 package mutiny.relay
 
+import com.ctre.phoenix6.controls.VoltageOut
+import com.ctre.phoenix6.hardware.TalonFXS
+import com.ctre.phoenix6.hardware.TalonFX
 import com.revrobotics.REVLibError
 import com.revrobotics.spark.SparkLowLevel
 import com.revrobotics.spark.SparkMax
@@ -26,6 +29,8 @@ import mutiny.relay.DeviceKind.DIGITAL_INPUT
 import mutiny.relay.DeviceKind.DIGITAL_OUTPUT
 import mutiny.relay.DeviceKind.PWM
 import mutiny.relay.DeviceKind.SPARKMAX
+import mutiny.relay.DeviceKind.TALONFXS
+import mutiny.relay.DeviceKind.TALONFX
 import mutiny.relay.PwmMode.MOTOR
 import mutiny.relay.PwmMode.SERVO
 import mutiny.relay.RegisterOutcome.Error
@@ -40,8 +45,20 @@ private const val ANALOG_OUT_MAX = 5.0
 private const val SPARKMAX_OUT_MIN = -1.0
 private const val SPARKMAX_OUT_MAX = 1.0
 
+/** Valid TALONFXS setOutput input range */
+private const val TALONFXS_OUT_MIN = -1.0
+private const val TALONFXS_OUT_MAX = 1.0
+
+/** Valid TALONFX setOutput input range */
+private const val TALONFX_OUT_MIN = -1.0
+private const val TALONFX_OUT_MAX = 1.0
+
+
 /** Sentinel `id` for an error about a token that resolves to no entry. */
 private const val UNKNOWN_ID = -1
+
+/** Duration before we time out a CAN Device registration */
+private const val CANBUS_INIT_TIMEOUT_SECONDS = 1.0
 
 /**
  * Outcome of executing a single [RobotAction] against a [HardwareRegistry].
@@ -97,6 +114,16 @@ internal data class SparkMaxEntry(
     val handle: SparkMax,
 )
 
+internal data class TalonFXSEntry(
+    val deviceId: Int,
+    val handle: TalonFXS,
+)
+
+internal data class TalonFXEntry(
+    val deviceId: Int,
+    val handle: TalonFX,
+)
+
 /**
  * Holds the live WPILib handles the relay has allocated. Every device family is
  * token-keyed and session-owned: each registration mints an opaque [Token],
@@ -135,6 +162,10 @@ class HardwareRegistry {
 
     internal val sparkMaxDevices = HashMap<Token, SparkMaxEntry>()
     internal val sparkMaxByDeviceId = HashMap<Int, Token>()
+    internal val talonFXSDevices = HashMap<Token, TalonFXSEntry>()
+    internal val talonFXDevices = HashMap<Token, TalonFXEntry>()
+    internal val talonFXSByDeviceId = HashMap<Int, Token>()
+    internal val talonFXByDeviceId = HashMap<Int, Token>()
 }
 
 /**
@@ -325,7 +356,94 @@ fun register(
                 }
             }
         }
-
+        // ---------------------------------------------------------- TALON FXS
+        is RobotAction.RegisterTalonFXS -> {
+            if (registry.talonFXSByDeviceId.containsKey(action.deviceId)) {
+                Error(DeviceAlreadyRegistered(TALONFXS, action.deviceId))
+            } else {
+                val device =
+                    try {
+                        TalonFXS(action.deviceId)
+                    } catch (e: Exception) {
+                        return Error(AllocationFailed(TALONFXS, action.deviceId, e.describe()))
+                    }
+                val rejection =
+                    try {
+                        val status = device.deviceTemp.waitForUpdate(CANBUS_INIT_TIMEOUT_SECONDS).status
+                        if (status.isOK) {
+                            null
+                        } else {
+                            ApplyError.NotConnected(TALONFXS, action.deviceId)
+                        }
+                    } catch (e: Exception) {
+                        ApplyError.HardwareFault(TALONFXS, action.deviceId, e.describe())
+                    }
+                if (rejection != null) {
+                    try {
+                        device.close()
+                    } catch (e: Exception) {
+                        println(
+                            "Failed to clean up TALONFXS ${action.deviceId}: ${e.describe()} " +
+                                "that did not pass verification",
+                        )
+                    }
+                    Error(rejection)
+                } else {
+                    installToken(
+                        registry,
+                        session,
+                        action.deviceId,
+                        TalonFXSEntry(action.deviceId, device),
+                        registry.talonFXSDevices,
+                        registry.talonFXSByDeviceId,
+                    )
+                }
+            }
+        }
+        // ---------------------------------------------------------- TALON FX
+        is RobotAction.RegisterTalonFX -> {
+            if (registry.talonFXByDeviceId.containsKey(action.deviceId)) {
+                Error(DeviceAlreadyRegistered(TALONFX, action.deviceId))
+            } else {
+                val device =
+                    try {
+                        TalonFX(action.deviceId)
+                    } catch (e: Exception) {
+                        return Error(AllocationFailed(TALONFX, action.deviceId, e.describe()))
+                    }
+                val rejection =
+                    try {
+                        val status = device.deviceTemp.waitForUpdate(CANBUS_INIT_TIMEOUT_SECONDS).status
+                        if (status.isOK) {
+                            null
+                        } else {
+                            ApplyError.NotConnected(TALONFX, action.deviceId)
+                        }
+                    } catch (e: Exception) {
+                        ApplyError.HardwareFault(TALONFX, action.deviceId, e.describe())
+                    }
+                if (rejection != null) {
+                    try {
+                        device.close()
+                    } catch (e: Exception) {
+                        println(
+                            "Failed to clean up TALONFX ${action.deviceId}: ${e.describe()} " +
+                                "that did not pass verification",
+                        )
+                    }
+                    Error(rejection)
+                } else {
+                    installToken(
+                        registry,
+                        session,
+                        action.deviceId,
+                        TalonFXEntry(action.deviceId, device),
+                        registry.talonFXDevices,
+                        registry.talonFXByDeviceId,
+                    )
+                }
+            }
+        }
         // Operate / deregister variants are handled by execute(); they should not
         // arrive here. A misrouted operate is reported as a failure rather than
         // silently dropped.
@@ -561,6 +679,104 @@ fun execute(
             releaseToken(registry.sparkMaxDevices, registry.sparkMaxByDeviceId, action.token, SPARKMAX) {
                 it.deviceId to it.handle
             }
+        // ---------------------------------------------------------- TALON FXS
+        is RobotAction.SetTalonFXSOutput -> {
+            if (!enabled) {
+                ApplyOutcome.Failed(
+                    RobotDisabled(TALONFXS, registry.talonFXSDevices[action.token]?.deviceId ?: UNKNOWN_ID),
+                )
+            } else {
+                val entry = registry.talonFXSDevices[action.token]
+                when {
+                    entry == null ->
+                        ApplyOutcome.Failed(NotRegistered(TALONFXS, UNKNOWN_ID))
+                    action.output !in TALONFXS_OUT_MIN..TALONFXS_OUT_MAX ->
+                        ApplyOutcome.Failed(
+                            OutOfRange(
+                                TALONFXS,
+                                entry.deviceId,
+                                "dutyCycle",
+                                action.output,
+                                TALONFXS_OUT_MIN,
+                                TALONFXS_OUT_MAX,
+                            ),
+                        )
+                    else -> runOperate(TALONFXS, entry.deviceId) { entry.handle.set(action.output) }
+                }
+            }
+        }
+
+        is RobotAction.SetTalonFXSVoltage -> {
+            if (!enabled) {
+                ApplyOutcome.Failed(
+                    RobotDisabled(TALONFXS, registry.talonFXSDevices[action.token]?.deviceId ?: UNKNOWN_ID),
+                )
+            } else {
+                val entry = registry.talonFXSDevices[action.token]
+                if (entry == null) {
+                    ApplyOutcome.Failed(NotRegistered(TALONFXS, UNKNOWN_ID))
+                } else {
+                    runOperate(TALONFXS, entry.deviceId) {
+                        val voltageRequest = VoltageOut(action.voltage)
+                        entry.handle.setControl(voltageRequest)
+                    }
+                }
+            }
+        }
+
+        is RobotAction.DeregisterTalonFXS ->
+            releaseToken(registry.talonFXSDevices, registry.talonFXSByDeviceId, action.token, TALONFXS) {
+                it.deviceId to it.handle
+            }
+        // ---------------------------------------------------------- TALON FX
+        is RobotAction.SetTalonFXOutput -> {
+            if (!enabled) {
+                ApplyOutcome.Failed(
+                    RobotDisabled(TALONFX, registry.talonFXDevices[action.token]?.deviceId ?: UNKNOWN_ID),
+                )
+            } else {
+                val entry = registry.talonFXDevices[action.token]
+                when {
+                    entry == null ->
+                        ApplyOutcome.Failed(NotRegistered(TALONFX, UNKNOWN_ID))
+                    action.output !in TALONFX_OUT_MIN..TALONFX_OUT_MAX ->
+                        ApplyOutcome.Failed(
+                            OutOfRange(
+                                TALONFX,
+                                entry.deviceId,
+                                "dutyCycle",
+                                action.output,
+                                TALONFX_OUT_MIN,
+                                TALONFX_OUT_MAX,
+                            ),
+                        )
+                    else -> runOperate(TALONFX, entry.deviceId) { entry.handle.set(action.output) }
+                }
+            }
+        }
+
+        is RobotAction.SetTalonFXVoltage -> {
+            if (!enabled) {
+                ApplyOutcome.Failed(
+                    RobotDisabled(TALONFX, registry.talonFXDevices[action.token]?.deviceId ?: UNKNOWN_ID),
+                )
+            } else {
+                val entry = registry.talonFXDevices[action.token]
+                if (entry == null) {
+                    ApplyOutcome.Failed(NotRegistered(TALONFX, UNKNOWN_ID))
+                } else {
+                    runOperate(TALONFX, entry.deviceId) {
+                        val voltageRequest = VoltageOut(action.voltage)
+                        entry.handle.setControl(voltageRequest)
+                    }
+                }
+            }
+        }
+
+        is RobotAction.DeregisterTalonFX ->
+            releaseToken(registry.talonFXDevices, registry.talonFXByDeviceId, action.token, TALONFX) {
+                it.deviceId to it.handle
+            }
 
         // Token registers route through register(); reaching execute() with one
         // is a client routing error.
@@ -571,6 +787,8 @@ fun execute(
         is RobotAction.RegisterAnalogOutput,
         is RobotAction.RegisterCanRx,
         is RobotAction.RegisterBrushlessSparkMax,
+        is RobotAction.RegisterTalonFXS,
+        is RobotAction.RegisterTalonFX,
         ->
             ApplyOutcome.Failed(
                 AllocationFailed(CAN, UNKNOWN_ID, "register action sent via the operate path"),
@@ -633,6 +851,120 @@ fun sample(
                     ),
             )
         }
+    // TODO: Perhaps add a check if the timestamp changed
+    //      so we only send an update if the snapshot actually updated
+    val talonFXSSnapshots =
+        registry.talonFXSDevices.values.associateBy({ it.deviceId }) { entry ->
+            val positionSignal = entry.handle.position
+            val velocitySignal = entry.handle.velocity
+            val motorVoltageSignal = entry.handle.motorVoltage
+
+            val currentPositionTimestamp = positionSignal.timestamp
+            val currentVelocityTimestamp = velocitySignal.timestamp
+            val currentMotorVoltageTimestamp = motorVoltageSignal.timestamp
+
+            val positionStatus =
+                if (positionSignal.status.isOK) {
+                    SignalStatus.Ok
+                } else {
+                    SignalStatus.Error(
+                        "CTRE status: " + positionSignal.status.name + " - " + positionSignal.status.description,
+                    )
+                }
+            val velocityStatus =
+                if (velocitySignal.status.isOK) {
+                    SignalStatus.Ok
+                } else {
+                    SignalStatus.Error(
+                        "CTRE status: " + velocitySignal.status.name + " - " + velocitySignal.status.description,
+                    )
+                }
+            val motorVoltageStatus =
+                if (motorVoltageSignal.status.isOK) {
+                    SignalStatus.Ok
+                } else {
+                    SignalStatus.Error(
+                        "CTRE status: " + motorVoltageSignal.status.name + " - " + motorVoltageSignal.status.description,
+                    )
+                }
+
+            Snapshot.TalonFXSSnapshot(
+                position =
+                    SignalSample(
+                        value = positionSignal.valueAsDouble,
+                        timestampSeconds = currentPositionTimestamp.time,
+                        status = positionStatus,
+                    ),
+                velocity =
+                    SignalSample(
+                        value = velocitySignal.valueAsDouble,
+                        timestampSeconds = currentVelocityTimestamp.time,
+                        status = velocityStatus,
+                    ),
+                motorVoltage =
+                    SignalSample(
+                        value = motorVoltageSignal.valueAsDouble,
+                        timestampSeconds = currentMotorVoltageTimestamp.time,
+                        status = motorVoltageStatus,
+                    ),
+            )
+        }
+    val talonFXSnapshots =
+        registry.talonFXDevices.values.associateBy({ it.deviceId }) { entry ->
+            val positionSignal = entry.handle.position
+            val velocitySignal = entry.handle.velocity
+            val motorVoltageSignal = entry.handle.motorVoltage
+
+            val currentPositionTimestamp = positionSignal.timestamp
+            val currentVelocityTimestamp = velocitySignal.timestamp
+            val currentMotorVoltageTimestamp = motorVoltageSignal.timestamp
+
+            val positionStatus =
+                if (positionSignal.status.isOK) {
+                    SignalStatus.Ok
+                } else {
+                    SignalStatus.Error(
+                        "CTRE status: " + positionSignal.status.name + " - " + positionSignal.status.description,
+                    )
+                }
+            val velocityStatus =
+                if (velocitySignal.status.isOK) {
+                    SignalStatus.Ok
+                } else {
+                    SignalStatus.Error(
+                        "CTRE status: " + velocitySignal.status.name + " - " + velocitySignal.status.description,
+                    )
+                }
+            val motorVoltageStatus =
+                if (motorVoltageSignal.status.isOK) {
+                    SignalStatus.Ok
+                } else {
+                    SignalStatus.Error(
+                        "CTRE status: " + motorVoltageSignal.status.name + " - " + motorVoltageSignal.status.description,
+                    )
+                }
+
+            Snapshot.TalonFXSnapshot(
+                position =
+                    SignalSample(
+                        value = positionSignal.valueAsDouble,
+                        timestampSeconds = currentPositionTimestamp.time,
+                        status = positionStatus,
+                    ),
+                velocity =
+                    SignalSample(
+                        value = velocitySignal.valueAsDouble,
+                        timestampSeconds = currentVelocityTimestamp.time,
+                        status = velocityStatus,
+                    ),
+                motorVoltage =
+                    SignalSample(
+                        value = motorVoltageSignal.valueAsDouble,
+                        timestampSeconds = currentMotorVoltageTimestamp.time,
+                        status = motorVoltageStatus,
+                    ),
+            )
+        }
     val canFrames = HashMap<String, CanFrameSnapshot>()
     for (entry in registry.canRx.values) {
         val valid = entry.handle.readPacketLatest(entry.apiId, registry.canBuffer)
@@ -667,6 +999,8 @@ fun sample(
         pwmSpeed = pwmSpeed,
         pwmPosition = pwmPosition,
         sparkMaxSnapshots = sparkMaxSnapshots,
+        talonFXSSnapshots = talonFXSSnapshots,
+        talonFXSnapshots = talonFXSnapshots,
         canFrames = canFrames,
         errors = errors,
     )
@@ -712,6 +1046,14 @@ fun releaseSession(
             runCatching { entry.handle.close() }
             registry.sparkMaxByDeviceId.remove(entry.deviceId)
         }
+        registry.talonFXSDevices.remove(token)?.let { entry ->
+            runCatching { entry.handle.close() }
+            registry.talonFXSByDeviceId.remove(entry.deviceId)
+        }
+        registry.talonFXDevices.remove(token)?.let { entry ->
+            runCatching { entry.handle.close() }
+            registry.talonFXByDeviceId.remove(entry.deviceId)
+        }
     }
 }
 
@@ -725,6 +1067,8 @@ fun close(registry: HardwareRegistry) {
     registry.canRx.values.forEach { runCatching { it.handle.close() } }
     registry.canWriteDevices.values.forEach { runCatching { it.close() } }
     registry.sparkMaxDevices.values.forEach { runCatching { it.handle.close() } }
+    registry.talonFXSDevices.values.forEach { runCatching { it.handle.close() } }
+    registry.talonFXDevices.values.forEach { runCatching { it.handle.close() } }
     registry.pwm.clear()
     registry.digitalInputs.clear()
     registry.digitalOutputs.clear()
@@ -741,6 +1085,10 @@ fun close(registry: HardwareRegistry) {
     registry.canWriteDevices.clear()
     registry.sparkMaxDevices.clear()
     registry.sparkMaxByDeviceId.clear()
+    registry.talonFXSDevices.clear()
+    registry.talonFXSByDeviceId.clear()
+    registry.talonFXDevices.clear()
+    registry.talonFXByDeviceId.clear()
 }
 
 private const val WARMUP_PWM_PORT = 0

@@ -176,4 +176,72 @@ sealed interface RobotAction {
         val token: Token,
         val voltage: Double,
     ) : RobotAction
+
+    // --------------------------------------------------------------- TALON FXS
+    @Serializable
+    @SerialName(
+        "talonfxs.register",
+    )
+    data class RegisterTalonFXS(
+        val deviceId: Int,
+    ) : RobotAction
+
+    @Serializable
+    @SerialName("talonfxs.deregister")
+    data class DeregisterTalonFXS(
+        val token: Token,
+    ) : RobotAction
+
+    /** @param output corresponds to a normalized voltage from -1.0 to 1.0 where -1.0 represents the full
+     *  available voltage in reverse and 1.0 represents the full available voltage forward.
+     *  This means that .5 will produce an output corresponding to 6V if the power supply is at 12V, but
+     *  only 5V if the power supply is at 10V.*/
+    @Serializable
+    @SerialName("talonfxs.setOutput")
+    data class SetTalonFXSOutput(
+        val token: Token,
+        val output: Double,
+    ) : RobotAction
+
+    @Serializable
+    @SerialName("talonfxs.setVoltage")
+    data class SetTalonFXSVoltage(
+        val token: Token,
+        val voltage: Double,
+    ) : RobotAction
+
+    // --------------------------------------------------------------- TALON FX
+    @Serializable
+    @SerialName(
+        "talonfx.register",
+    )
+    data class RegisterTalonFX(
+        val deviceId: Int,
+    ) : RobotAction
+
+    @Serializable
+    @SerialName("talonfx.deregister")
+    data class DeregisterTalonFX(
+        val token: Token,
+    ) : RobotAction
+
+    /** @param output corresponds to a normalized voltage from -1.0 to 1.0 where -1.0 represents the full
+     *  available voltage in reverse and 1.0 represents the full available voltage forward.
+     *  This means that .5 will produce an output corresponding to 6V if the power supply is at 12V, but
+     *  only 5V if the power supply is at 10V.*/
+    @Serializable
+    @SerialName("talonfx.setOutput")
+    data class SetTalonFXOutput(
+        val token: Token,
+        val output: Double,
+    ) : RobotAction
+
+    @Serializable
+    @SerialName("talonfx.setVoltage")
+    data class SetTalonFXVoltage(
+        val token: Token,
+        val voltage: Double,
+    ) : RobotAction
+
+
 }

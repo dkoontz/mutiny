@@ -3,6 +3,8 @@ import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import mutiny.relay.Snapshot.CanFrameSnapshot
 import mutiny.relay.Snapshot.SparkMaxSnapshot
+import mutiny.relay.Snapshot.TalonFXSSnapshot
+import mutiny.relay.Snapshot.TalonFXSnapshot
 
 @Serializable
 sealed interface SignalStatus {
@@ -56,6 +58,20 @@ sealed interface Snapshot {
         val position: SignalSample,
         val velocity: SignalSample,
     ) : Snapshot
+
+    @Serializable
+    data class TalonFXSSnapshot(
+        val position: SignalSample,
+        val velocity: SignalSample,
+        val motorVoltage: SignalSample,
+    ) : Snapshot
+
+    @Serializable
+    data class TalonFXSnapshot(
+        val position: SignalSample,
+        val velocity: SignalSample,
+        val motorVoltage: SignalSample,
+    ) : Snapshot
 }
 
 /** Diagnostic for an action that failed to execute: the exact action plus its structured reason. */
@@ -85,6 +101,8 @@ data class RobotState(
     val pwmSpeed: Map<Int, Double>,
     val pwmPosition: Map<Int, Double>,
     val sparkMaxSnapshots: Map<Int, SparkMaxSnapshot>,
+    val talonFXSSnapshots: Map<Int, TalonFXSSnapshot>,
+    val talonFXSnapshots: Map<Int, TalonFXSnapshot>,
     val canFrames: Map<String, CanFrameSnapshot>,
     val errors: List<ActionError>,
 ) {
@@ -105,6 +123,8 @@ data class RobotState(
                 pwmSpeed = emptyMap(),
                 pwmPosition = emptyMap(),
                 sparkMaxSnapshots = emptyMap(),
+                talonFXSSnapshots = emptyMap(),
+                talonFXSnapshots = emptyMap(),
                 canFrames = emptyMap(),
                 errors = emptyList(),
             )
