@@ -90,6 +90,18 @@ sealed interface ApplyError {
         val detail: String,
     ) : ApplyError
 
+    /** A CTRE control request was rejected at submission (non-OK StatusCode). */
+    @Serializable
+    @SerialName("controlRejected")
+    data class ControlRejected(
+        override val deviceKind: DeviceKind,
+        override val id: Int,
+        /** CTRE status name, e.g. "InvalidParamValue". */
+        val statusName: String,
+        /** Human-readable CTRE status description. */
+        val statusDescription: String,
+    ) : ApplyError
+
     /** A register action targeted a port/channel already held by a registration. */
     @Serializable
     @SerialName("alreadyRegistered")

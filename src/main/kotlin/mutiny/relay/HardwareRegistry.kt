@@ -1,5 +1,7 @@
 package mutiny.relay
 
+import com.ctre.phoenix6.StatusCode
+import com.ctre.phoenix6.controls.DutyCycleOut
 import com.ctre.phoenix6.controls.VoltageOut
 import com.ctre.phoenix6.hardware.CANcoder
 import com.ctre.phoenix6.hardware.Pigeon2
@@ -17,6 +19,7 @@ import edu.wpi.first.wpilibj.DigitalOutput
 import edu.wpi.first.wpilibj.PWM
 import edu.wpi.first.wpilibj.RobotController
 import mutiny.relay.ApplyError.AllocationFailed
+import mutiny.relay.ApplyError.ControlRejected
 import mutiny.relay.ApplyError.DeviceAlreadyRegistered
 import mutiny.relay.ApplyError.HardwareFault
 import mutiny.relay.ApplyError.InvalidCanByte
@@ -805,7 +808,10 @@ fun execute(
                                 TALONFXS_OUT_MAX,
                             ),
                         )
-                    else -> runOperate(TALONFXS, entry.deviceId) { entry.handle.set(action.output) }
+                    else ->
+                        runCtreOperate(TALONFXS, entry.deviceId) {
+                            entry.handle.setControl(DutyCycleOut(action.output))
+                        }
                 }
             }
         }
@@ -820,9 +826,8 @@ fun execute(
                 if (entry == null) {
                     ApplyOutcome.Failed(NotRegistered(TALONFXS, UNKNOWN_ID))
                 } else {
-                    runOperate(TALONFXS, entry.deviceId) {
-                        val voltageRequest = VoltageOut(action.voltage)
-                        entry.handle.setControl(voltageRequest)
+                    runCtreOperate(TALONFXS, entry.deviceId) {
+                        entry.handle.setControl(VoltageOut(action.voltage))
                     }
                 }
             }
@@ -854,7 +859,10 @@ fun execute(
                                 TALONFX_OUT_MAX,
                             ),
                         )
-                    else -> runOperate(TALONFX, entry.deviceId) { entry.handle.set(action.output) }
+                    else ->
+                        runCtreOperate(TALONFX, entry.deviceId) {
+                            entry.handle.setControl(DutyCycleOut(action.output))
+                        }
                 }
             }
         }
@@ -869,9 +877,8 @@ fun execute(
                 if (entry == null) {
                     ApplyOutcome.Failed(NotRegistered(TALONFX, UNKNOWN_ID))
                 } else {
-                    runOperate(TALONFX, entry.deviceId) {
-                        val voltageRequest = VoltageOut(action.voltage)
-                        entry.handle.setControl(voltageRequest)
+                    runCtreOperate(TALONFX, entry.deviceId) {
+                        entry.handle.setControl(VoltageOut(action.voltage))
                     }
                 }
             }
@@ -1416,6 +1423,28 @@ private inline fun runOperate(
     try {
         block()
         ApplyOutcome.Applied
+    } catch (e: Exception) {
+        ApplyOutcome.Failed(HardwareFault(deviceKind, id, e.describe()))
+    }
+
+/**
+ * Run [block] on a registered CTRE handle. A non-OK [StatusCode] is a
+ * [ControlRejected] (the request was not applied); a throw is a [HardwareFault].
+ */
+private inline fun runCtreOperate(
+    deviceKind: DeviceKind,
+    id: Int,
+    block: () -> StatusCode,
+): ApplyOutcome =
+    try {
+        val status = block()
+        if (status.isOK) {
+            ApplyOutcome.Applied
+        } else {
+            ApplyOutcome.Failed(
+                ControlRejected(deviceKind, id, status.name, status.description),
+            )
+        }
     } catch (e: Exception) {
         ApplyOutcome.Failed(HardwareFault(deviceKind, id, e.describe()))
     }
