@@ -243,5 +243,33 @@ sealed interface RobotAction {
         val voltage: Double,
     ) : RobotAction
 
+    // --------------------------------------------------------------- CANCODER
+    @Serializable
+    @SerialName(
+        "cancoder.register",
+    )
+    data class RegisterCANcoder(
+        val deviceId: Int,
+    ) : RobotAction
 
+    @Serializable
+    @SerialName("cancoder.deregister")
+    data class DeregisterCANcoder(
+        val token: Token,
+    ) : RobotAction
+
+    // --------------------------------------------------------------- PIGEON
+    @Serializable
+    @SerialName(
+        "pigeon.register",
+    )
+    data class RegisterPigeon(
+        val deviceId: Int,
+    ) : RobotAction
+
+    @Serializable
+    @SerialName("pigeon.deregister")
+    data class DeregisterPigeon(
+        val token: Token,
+    ) : RobotAction
 }

@@ -15,6 +15,8 @@ enum class DeviceKind {
     SPARKMAX,
     TALONFXS,
     TALONFX,
+    CANCODER,
+    PIGEON,
 }
 
 /**

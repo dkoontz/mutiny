@@ -1,7 +1,9 @@
 package mutiny.relay
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import mutiny.relay.Snapshot.CANcoderSnapshot
 import mutiny.relay.Snapshot.CanFrameSnapshot
+import mutiny.relay.Snapshot.PigeonSnapshot
 import mutiny.relay.Snapshot.SparkMaxSnapshot
 import mutiny.relay.Snapshot.TalonFXSSnapshot
 import mutiny.relay.Snapshot.TalonFXSnapshot
@@ -66,11 +68,31 @@ sealed interface Snapshot {
         val motorVoltage: SignalSample,
     ) : Snapshot
 
+    // TODO: standardize units?
     @Serializable
     data class TalonFXSnapshot(
         val position: SignalSample,
         val velocity: SignalSample,
         val motorVoltage: SignalSample,
+    ) : Snapshot
+
+    @Serializable
+    data class CANcoderSnapshot(
+        val absolutePos: SignalSample,
+        val relativePos: SignalSample,
+        val velocity: SignalSample,
+    ) : Snapshot
+
+    @Serializable
+    data class PigeonSnapshot(
+        // Angular velocity vector, rotations/sec, world/robot-aligned frame
+        val angularVelocityX: SignalSample,
+        val angularVelocityY: SignalSample,
+        val angularVelocityZ: SignalSample,
+        // Euler orientation, rotations
+        val yaw: SignalSample,
+        val pitch: SignalSample,
+        val roll: SignalSample,
     ) : Snapshot
 }
 
@@ -103,6 +125,8 @@ data class RobotState(
     val sparkMaxSnapshots: Map<Int, SparkMaxSnapshot>,
     val talonFXSSnapshots: Map<Int, TalonFXSSnapshot>,
     val talonFXSnapshots: Map<Int, TalonFXSnapshot>,
+    val cancoderSnapshots: Map<Int, CANcoderSnapshot>,
+    val pigeonSnapshots: Map<Int, PigeonSnapshot>,
     val canFrames: Map<String, CanFrameSnapshot>,
     val errors: List<ActionError>,
 ) {
@@ -125,6 +149,8 @@ data class RobotState(
                 sparkMaxSnapshots = emptyMap(),
                 talonFXSSnapshots = emptyMap(),
                 talonFXSnapshots = emptyMap(),
+                cancoderSnapshots = emptyMap(),
+                pigeonSnapshots = emptyMap(),
                 canFrames = emptyMap(),
                 errors = emptyList(),
             )
