@@ -282,6 +282,110 @@ class HardwareRegistryTest {
         assertTrue(outcome is ApplyOutcome.Applied)
     }
 
+    // ------------------------------------------------------------- TALON FXS
+
+    @Test
+    fun `a RegisterTalonFXS sent via the operate path is a failure`() {
+        val outcome = execute(registry, enabled = true, RobotAction.RegisterTalonFXS(DEVICE_ID))
+
+        assertTrue(outcome is ApplyOutcome.Failed)
+        assertTrue((outcome as ApplyOutcome.Failed).error is AllocationFailed)
+    }
+
+    @Test
+    fun `SetTalonFXSOutput with an unknown token is NotRegistered`() {
+        val outcome =
+            execute(registry, enabled = true, RobotAction.SetTalonFXSOutput(Token("nope"), output = 0.5))
+
+        assertTrue(outcome is ApplyOutcome.Failed)
+        assertTrue((outcome as ApplyOutcome.Failed).error is ApplyError.NotRegistered)
+    }
+
+    @Test
+    fun `SetTalonFXSVoltage with an unknown token is NotRegistered`() {
+        val outcome =
+            execute(registry, enabled = true, RobotAction.SetTalonFXSVoltage(Token("nope"), voltage = 6.0))
+
+        assertTrue(outcome is ApplyOutcome.Failed)
+        assertTrue((outcome as ApplyOutcome.Failed).error is ApplyError.NotRegistered)
+    }
+
+    @Test
+    fun `DeregisterTalonFXS with an unknown token is idempotent`() {
+        val outcome = execute(registry, enabled = true, RobotAction.DeregisterTalonFXS(Token("nope")))
+
+        assertTrue(outcome is ApplyOutcome.Applied)
+    }
+
+    // ------------------------------------------------------------- TALON FX
+
+    @Test
+    fun `a RegisterTalonFX sent via the operate path is a failure`() {
+        val outcome = execute(registry, enabled = true, RobotAction.RegisterTalonFX(DEVICE_ID))
+
+        assertTrue(outcome is ApplyOutcome.Failed)
+        assertTrue((outcome as ApplyOutcome.Failed).error is AllocationFailed)
+    }
+
+    @Test
+    fun `SetTalonFXOutput with an unknown token is NotRegistered`() {
+        val outcome =
+            execute(registry, enabled = true, RobotAction.SetTalonFXOutput(Token("nope"), output = 0.5))
+
+        assertTrue(outcome is ApplyOutcome.Failed)
+        assertTrue((outcome as ApplyOutcome.Failed).error is ApplyError.NotRegistered)
+    }
+
+    @Test
+    fun `SetTalonFXVoltage with an unknown token is NotRegistered`() {
+        val outcome =
+            execute(registry, enabled = true, RobotAction.SetTalonFXVoltage(Token("nope"), voltage = 6.0))
+
+        assertTrue(outcome is ApplyOutcome.Failed)
+        assertTrue((outcome as ApplyOutcome.Failed).error is ApplyError.NotRegistered)
+    }
+
+    @Test
+    fun `DeregisterTalonFX with an unknown token is idempotent`() {
+        val outcome = execute(registry, enabled = true, RobotAction.DeregisterTalonFX(Token("nope")))
+
+        assertTrue(outcome is ApplyOutcome.Applied)
+    }
+
+    // ------------------------------------------------------------- CANCODER
+
+    @Test
+    fun `a RegisterCANcoder sent via the operate path is a failure`() {
+        val outcome = execute(registry, enabled = true, RobotAction.RegisterCANcoder(DEVICE_ID))
+
+        assertTrue(outcome is ApplyOutcome.Failed)
+        assertTrue((outcome as ApplyOutcome.Failed).error is AllocationFailed)
+    }
+
+    @Test
+    fun `DeregisterCANcoder with an unknown token is idempotent`() {
+        val outcome = execute(registry, enabled = true, RobotAction.DeregisterCANcoder(Token("nope")))
+
+        assertTrue(outcome is ApplyOutcome.Applied)
+    }
+
+    // --------------------------------------------------------------- PIGEON
+
+    @Test
+    fun `a RegisterPigeon sent via the operate path is a failure`() {
+        val outcome = execute(registry, enabled = true, RobotAction.RegisterPigeon(DEVICE_ID))
+
+        assertTrue(outcome is ApplyOutcome.Failed)
+        assertTrue((outcome as ApplyOutcome.Failed).error is AllocationFailed)
+    }
+
+    @Test
+    fun `DeregisterPigeon with an unknown token is idempotent`() {
+        val outcome = execute(registry, enabled = true, RobotAction.DeregisterPigeon(Token("nope")))
+
+        assertTrue(outcome is ApplyOutcome.Applied)
+    }
+
     private companion object {
         const val PORT_1 = 1
         const val PORT_2 = 2
