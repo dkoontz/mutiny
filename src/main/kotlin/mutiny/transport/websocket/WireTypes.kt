@@ -24,6 +24,7 @@ data class Subscription(
     val analogOutputs: Set<Int>? = null,
     val canFrames: Set<String>? = null,
     val sparkMax: Set<Int>? = null,
+    val hidInputs: Set<Int>? = null,
 ) {
     companion object {
         /** Include everything registered — the default for a new connection. */

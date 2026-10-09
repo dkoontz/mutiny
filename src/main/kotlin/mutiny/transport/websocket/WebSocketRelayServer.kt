@@ -163,6 +163,7 @@ private fun filter(
         analogOutputs = keepKeys(state.analogOutputs, subscription.analogOutputs),
         canFrames = keepKeys(state.canFrames, subscription.canFrames),
         sparkMaxSnapshots = keepKeys(state.sparkMaxSnapshots, subscription.sparkMax),
+        hidValues = keepKeys(state.hidValues, subscription.hidInputs),
     )
 
 private fun <K, V> keepKeys(

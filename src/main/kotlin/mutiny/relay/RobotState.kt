@@ -2,6 +2,7 @@ package mutiny.relay
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import mutiny.relay.Snapshot.CanFrameSnapshot
+import mutiny.relay.Snapshot.HIDSnapshot
 import mutiny.relay.Snapshot.SparkMaxSnapshot
 
 @Serializable
@@ -56,6 +57,16 @@ sealed interface Snapshot {
         val position: SignalSample,
         val velocity: SignalSample,
     ) : Snapshot
+
+    @Serializable
+    data class HIDSnapshot(
+        val axisCount: Int,
+        val buttonCount: Int,
+        val povCount: Int,
+        val axisValues: Array<Double>,
+        val buttonValues: Array<Boolean>,
+        val povValues: Array<Int>,
+    )
 }
 
 /** Diagnostic for an action that failed to execute: the exact action plus its structured reason. */
@@ -86,6 +97,7 @@ data class RobotState(
     val pwmPosition: Map<Int, Double>,
     val sparkMaxSnapshots: Map<Int, SparkMaxSnapshot>,
     val canFrames: Map<String, CanFrameSnapshot>,
+    val hidValues: Map<Int, HIDSnapshot>,
     val errors: List<ActionError>,
 ) {
     companion object {
@@ -106,6 +118,7 @@ data class RobotState(
                 pwmPosition = emptyMap(),
                 sparkMaxSnapshots = emptyMap(),
                 canFrames = emptyMap(),
+                hidValues = emptyMap(),
                 errors = emptyList(),
             )
     }

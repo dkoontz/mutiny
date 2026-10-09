@@ -9,6 +9,7 @@ import edu.wpi.first.wpilibj.AnalogOutput
 import edu.wpi.first.wpilibj.CAN
 import edu.wpi.first.wpilibj.DigitalInput
 import edu.wpi.first.wpilibj.DigitalOutput
+import edu.wpi.first.wpilibj.GenericHID
 import edu.wpi.first.wpilibj.PWM
 import edu.wpi.first.wpilibj.RobotController
 import mutiny.relay.ApplyError.AllocationFailed
@@ -24,6 +25,7 @@ import mutiny.relay.DeviceKind.ANALOG_OUTPUT
 import mutiny.relay.DeviceKind.CAN
 import mutiny.relay.DeviceKind.DIGITAL_INPUT
 import mutiny.relay.DeviceKind.DIGITAL_OUTPUT
+import mutiny.relay.DeviceKind.HID_INPUT
 import mutiny.relay.DeviceKind.PWM
 import mutiny.relay.DeviceKind.SPARKMAX
 import mutiny.relay.PwmMode.MOTOR
@@ -97,6 +99,12 @@ internal data class SparkMaxEntry(
     val handle: SparkMax,
 )
 
+/** Token-keyed registration of a HID input, plus its port. */
+internal data class HIDInputEntry(
+    val port: Int,
+    val handle: GenericHID,
+)
+
 /**
  * Holds the live WPILib handles the relay has allocated. Every device family is
  * token-keyed and session-owned: each registration mints an opaque [Token],
@@ -135,6 +143,9 @@ class HardwareRegistry {
 
     internal val sparkMaxDevices = HashMap<Token, SparkMaxEntry>()
     internal val sparkMaxByDeviceId = HashMap<Int, Token>()
+
+    internal val hidInputs = HashMap<Token, HIDInputEntry>()
+    internal val hidInputsByChannel = HashMap<Int, Token>()
 }
 
 /**
@@ -326,10 +337,34 @@ fun register(
             }
         }
 
+        // ---------------------------------------------------------- HID Input
+        is RobotAction.RegisterHid -> {
+            if (registry.hidInputsByChannel.containsKey(action.token)) {
+                Error(DeviceAlreadyRegistered(HID_INPUT, action.token))
+            } else {
+                val handle =
+                    try {
+                        GenericHID(action.token)
+                    } catch (e: Exception) {
+                        return Error(AllocationFailed(HID_INPUT, action.token, e.describe()))
+                    }
+                installToken(
+                    registry,
+                    session,
+                    action.token,
+                    HIDInputEntry(action.token, handle),
+                    registry.hidInputs,
+                    registry.hidInputsByChannel,
+                )
+            }
+        }
+
         // Operate / deregister variants are handled by execute(); they should not
         // arrive here. A misrouted operate is reported as a failure rather than
         // silently dropped.
-        else -> Error(AllocationFailed(CAN, UNKNOWN_ID, "non-register action sent to register path"))
+        else -> {
+            Error(AllocationFailed(CAN, UNKNOWN_ID, "non-register action sent to register path"))
+        }
     }
 
 /**
@@ -557,10 +592,19 @@ fun execute(
             }
         }
 
-        is RobotAction.DeregisterSparkMax ->
+        is RobotAction.DeregisterSparkMax -> {
             releaseToken(registry.sparkMaxDevices, registry.sparkMaxByDeviceId, action.token, SPARKMAX) {
                 it.deviceId to it.handle
             }
+        }
+
+        is RobotAction.DeregisterHidInput -> {
+            val entry = registry.hidInputs.remove(action.token)
+            if (entry != null) {
+                registry.hidInputsByChannel.remove(entry.port)
+            }
+            ApplyOutcome.Applied
+        }
 
         // Token registers route through register(); reaching execute() with one
         // is a client routing error.
@@ -571,10 +615,12 @@ fun execute(
         is RobotAction.RegisterAnalogOutput,
         is RobotAction.RegisterCanRx,
         is RobotAction.RegisterBrushlessSparkMax,
-        ->
+        is RobotAction.RegisterHid,
+        -> {
             ApplyOutcome.Failed(
                 AllocationFailed(CAN, UNKNOWN_ID, "register action sent via the operate path"),
             )
+        }
     }
 
 /** Build an immutable snapshot of every input and commanded output in [registry]. */
@@ -652,6 +698,25 @@ fun sample(
                 fpgaTimestampUs = if (valid) registry.canBuffer.timestamp else 0L,
             )
     }
+    val hidValues =
+        registry.hidInputs.values.associateBy({ it.port }, { it ->
+            val axisCount = it.handle.axisCount
+            val buttonCount = it.handle.buttonCount
+            val povCount = it.handle.povCount
+            val axisValues = (0..<axisCount).map { i -> it.handle.getRawAxis(i) }.toTypedArray()
+            val buttonValues = (1..buttonCount).map { i -> it.handle.getRawButton(i) }.toTypedArray()
+            val povValues = (0..<povCount).map { i -> it.handle.getPOV(i) }.toTypedArray()
+
+            Snapshot.HIDSnapshot(
+                axisCount = axisCount,
+                buttonCount = buttonCount,
+                povCount = povCount,
+                axisValues = axisValues,
+                buttonValues = buttonValues,
+                povValues = povValues,
+            )
+        })
+
     return RobotState(
         sequence = sequence,
         timestampSec = timestampSec,
@@ -668,6 +733,7 @@ fun sample(
         pwmPosition = pwmPosition,
         sparkMaxSnapshots = sparkMaxSnapshots,
         canFrames = canFrames,
+        hidValues = hidValues,
         errors = errors,
     )
 }
@@ -712,6 +778,9 @@ fun releaseSession(
             runCatching { entry.handle.close() }
             registry.sparkMaxByDeviceId.remove(entry.deviceId)
         }
+        registry.hidInputs.remove(token)?.let { entry ->
+            registry.hidInputsByChannel.remove(entry.port)
+        }
     }
 }
 
@@ -741,6 +810,8 @@ fun close(registry: HardwareRegistry) {
     registry.canWriteDevices.clear()
     registry.sparkMaxDevices.clear()
     registry.sparkMaxByDeviceId.clear()
+    registry.hidInputs.clear()
+    registry.hidInputsByChannel.clear()
 }
 
 private const val WARMUP_PWM_PORT = 0

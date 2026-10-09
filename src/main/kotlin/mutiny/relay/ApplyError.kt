@@ -13,6 +13,7 @@ enum class DeviceKind {
     ANALOG_OUTPUT,
     CAN,
     SPARKMAX,
+    HID_INPUT,
 }
 
 /**

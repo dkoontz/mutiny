@@ -176,4 +176,18 @@ sealed interface RobotAction {
         val token: Token,
         val voltage: Double,
     ) : RobotAction
+
+    // --------------------------------------------------------------- HID
+
+    @Serializable
+    @SerialName("hid.register")
+    data class RegisterHid(
+        val token: Int,
+    ) : RobotAction
+
+    @Serializable
+    @SerialName("hid.deregister")
+    data class DeregisterHidInput(
+        val token: Token,
+    ) : RobotAction
 }
