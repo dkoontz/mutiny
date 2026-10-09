@@ -24,6 +24,7 @@ data class Subscription(
     val analogOutputs: Set<Int>? = null,
     val canFrames: Set<String>? = null,
     val sparkMax: Set<Int>? = null,
+    val hidInputs: Set<Int>? = null,
     val talonFX: Set<Int>? = null,
     val talonFXS: Set<Int>? = null,
     val cancoder: Set<Int>? = null,

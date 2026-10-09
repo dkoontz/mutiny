@@ -3,6 +3,7 @@ import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import mutiny.relay.Snapshot.CANcoderSnapshot
 import mutiny.relay.Snapshot.CanFrameSnapshot
+import mutiny.relay.Snapshot.HIDSnapshot
 import mutiny.relay.Snapshot.PigeonSnapshot
 import mutiny.relay.Snapshot.SparkMaxSnapshot
 import mutiny.relay.Snapshot.TalonFXSSnapshot
@@ -60,6 +61,16 @@ sealed interface Snapshot {
         val position: SignalSample,
         val velocity: SignalSample,
     ) : Snapshot
+
+    @Serializable
+    data class HIDSnapshot(
+        val axisCount: Int,
+        val buttonCount: Int,
+        val povCount: Int,
+        val axisValues: Array<Double>,
+        val buttonValues: Array<Boolean>,
+        val povValues: Array<Int>,
+    )
 
     @Serializable
     data class TalonFXSSnapshot(
@@ -128,6 +139,7 @@ data class RobotState(
     val cancoderSnapshots: Map<Int, CANcoderSnapshot>,
     val pigeonSnapshots: Map<Int, PigeonSnapshot>,
     val canFrames: Map<String, CanFrameSnapshot>,
+    val hidValues: Map<Int, HIDSnapshot>,
     val errors: List<ActionError>,
 ) {
     companion object {
@@ -152,6 +164,7 @@ data class RobotState(
                 cancoderSnapshots = emptyMap(),
                 pigeonSnapshots = emptyMap(),
                 canFrames = emptyMap(),
+                hidValues = emptyMap(),
                 errors = emptyList(),
             )
     }
